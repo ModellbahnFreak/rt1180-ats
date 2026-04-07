@@ -1,0 +1,7 @@
+debug
+.secureprovisioning
+.vscode
+build
+svd
+CMakePresets.json
+mcux_include.json
