@@ -1,0 +1,28 @@
+mainmenu "Asynchronous Traffic Shaping IEEE 802.1Qcr"
+
+config ATS_SCHEDULER_INSTANCES
+	int "Number of ATS instances (maximum number of apps)"
+    default 5
+	help
+	  The maximum number of ATS instances to allocate space for.
+	  Defines the maximum number of apps thet can be used
+
+config ATS_GROUP_INSTANCES
+	int "Number of ATS groups"
+    default 5
+	help
+	  The maximum number of ATS groups to allocate space for.
+	  Every scheduler used must be assigned to a group (multiple can be assigned to same group)
+
+config ATS_QUEUE_LENGTH
+    int "Size of queue for every ATS group"
+    default 5
+	help
+	  The size of the queue/ring buffer for every ATS scheduler group.
+	  If the queue is full and more packets arrive for the 
+
+config ATS_LOG_LEVEL
+	int "Log level to use in ATS code (none: 0 to debug: 4)"
+	default 4
+
+source "Kconfig.zephyr"

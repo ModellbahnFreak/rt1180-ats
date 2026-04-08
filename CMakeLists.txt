@@ -6,3 +6,6 @@ project(rt1180-ats)
 
 target_sources(app PRIVATE src/main.c)
 target_sources(app PRIVATE src/sender.c)
+target_sources(app PRIVATE src/ats.c)
+
+zephyr_linker_sources(DATA_SECTIONS src/ats.ld)
