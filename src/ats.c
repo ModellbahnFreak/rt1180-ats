@@ -1,9 +1,16 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
+
+// #include <zephyr/net/socket.h>
+// #include <zephyr/net/ethernet.h>
+// #include <zephyr/net/net_mgmt.h>
+#include <zephyr/posix/sys/socket.h>
+// #include <zephyr/posix/unistd.h>
+
 #include "ats.h"
 
-LOG_MODULE_DECLARE(ats, CONFIG_ATS_LOG_LEVEL);
+LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
 
 // Actual instances of ats struct in iterable struct section
 STRUCT_SECTION_ITERABLE(ats, ats_instance_0);
@@ -51,9 +58,10 @@ struct ats *ats_get_by_net_if(struct net_if *iface)
 
 uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPerSecond, uint32_t burstSize)
 {
+    __ASSERT(ats_data != NULL, "no ats structure passed");
     __ASSERT(groupId < CONFIG_ATS_GROUP_INSTANCES, "invalid ATS group id %d, out of range of %d available groups", groupId, CONFIG_ATS_GROUP_INSTANCES);
-    __ASSERT(tokensPerSecond <= 0, "committed information rate (CIR, tokensPreSecond) must be greater than 0!");
-    __ASSERT(burstSize <= 0, "committed burst size (CBS, burstSize) must be greater than 0!");
+    __ASSERT(tokensPerSecond > 0, "committed information rate (CIR, tokensPreSecond) must be greater than 0!");
+    __ASSERT(burstSize > 0, "committed burst size (CBS, burstSize) must be greater than 0!");
     int schedulerId = -1;
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
@@ -88,13 +96,18 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     return schedulerId;
 }
 
-int ats_send(struct ats *ats_data, uint8_t schedId, const char *buf, int len)
+int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
+    size_t len = net_pkt_get_len(pkt);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
     __ASSERT(ats_data->scheduler.tokensPerSecond[schedId] > 0, "ATS instance %d not registered/initialized", schedId);
     __ASSERT(len <= ats_data->scheduler.burstSize[schedId], "packet size %d exeeds burst size %d of ATS %d", len, ats_data->scheduler.burstSize[schedId], schedId);
 #endif
+
+    net_pkt_set_iface(pkt, ats_data->iface);
+
+    return net_send_data(pkt);
 
     return 0;
 }

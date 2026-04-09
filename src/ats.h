@@ -3,6 +3,7 @@
 
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/net_pkt.h>
 
 struct ats_scheduler
 {
@@ -48,7 +49,7 @@ struct ats *ats_get_by_net_if(struct net_if *iface);
  * @brief Allocate the first free ATS scheduler with the given parameters
  *
  * Errors if no free scheduler remains
- * 
+ *
  * @param groupId the id of the group to attach the scheduler to. Negative to use the first empty group.
  */
 uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPerSecond, uint32_t burstSize);
@@ -56,6 +57,6 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
 /**
  * @brief Send buffer using configured ATS scheduling
  */
-int ats_send(struct ats *ats_data, uint8_t schedId, const char *buf, int len);
+int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt);
 
 #endif
