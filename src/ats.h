@@ -6,11 +6,10 @@
 
 struct ats_scheduler
 {
-    const int64_t bucketEmptyTime[CONFIG_ATS_SCHEDULER_INSTANCES];
-    const uint32_t tokensPerSecond[CONFIG_ATS_SCHEDULER_INSTANCES]; // committed information rate
-    const uint32_t burstSize[CONFIG_ATS_SCHEDULER_INSTANCES];       // comitted burst size
-    const uint8_t schedulerGroup[CONFIG_ATS_SCHEDULER_INSTANCES];
-    uint8_t nextFreeScheduler; // First scheduler that has not been registered to a stream yet
+    int64_t bucketEmptyTime[CONFIG_ATS_SCHEDULER_INSTANCES];
+    uint32_t tokensPerSecond[CONFIG_ATS_SCHEDULER_INSTANCES]; // committed information rate
+    uint32_t burstSize[CONFIG_ATS_SCHEDULER_INSTANCES];       // comitted burst size
+    uint8_t schedulerGroup[CONFIG_ATS_SCHEDULER_INSTANCES];
 };
 
 struct ats_groups
@@ -28,10 +27,35 @@ struct ats
     struct net_if *iface;
 };
 
+/**
+ * @brief Initialize new ATS scheduler structure for a given net_if
+ *
+ * Tries to initialize the first free ATS structure in memory with the given net_if as upstream.
+ * Note: Initialization can't be undone.
+ *
+ * Errors if no free ATS structure remains
+ *
+ * @param iface The upstream l2 ethernet interface to send scheduled packets via
+ */
 struct ats *ats_init(struct net_if *iface);
 
-int ats_register_stream(struct ats *ats_data, uint8_t groupId, uint32_t tokensPerSecond, uint32_t burstSize);
+/**
+ * @brief find the ats structure for the given interface
+ */
+struct ats *ats_get_by_net_if(struct net_if *iface);
 
-int ats_send(char *buf, int len);
+/**
+ * @brief Allocate the first free ATS scheduler with the given parameters
+ *
+ * Errors if no free scheduler remains
+ * 
+ * @param groupId the id of the group to attach the scheduler to. Negative to use the first empty group.
+ */
+uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPerSecond, uint32_t burstSize);
+
+/**
+ * @brief Send buffer using configured ATS scheduling
+ */
+int ats_send(struct ats *ats_data, uint8_t schedId, const char *buf, int len);
 
 #endif
