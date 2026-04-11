@@ -7,24 +7,26 @@
 
 struct ats_scheduler
 {
-    int64_t bucketEmptyTime[CONFIG_ATS_SCHEDULER_INSTANCES];
-    uint32_t tokensPerSecond[CONFIG_ATS_SCHEDULER_INSTANCES]; // committed information rate
-    uint32_t burstSize[CONFIG_ATS_SCHEDULER_INSTANCES];       // comitted burst size
-    uint8_t schedulerGroup[CONFIG_ATS_SCHEDULER_INSTANCES];
+    int64_t bucketEmptyTime;
+    uint32_t tokensPerSecond; // committed information rate
+    uint32_t burstSize;       // comitted burst size
+    int64_t emptyToFullTimeNs;
+    uint8_t schedulerGroup;
 };
 
 struct ats_groups
 {
-    const void *queue[CONFIG_ATS_GROUP_INSTANCES][CONFIG_ATS_QUEUE_LENGTH];             // pointer to packet queue
-    const uint8_t queue_sched_ids[CONFIG_ATS_GROUP_INSTANCES][CONFIG_ATS_QUEUE_LENGTH]; // scheduler ids of packets in queue
-    int queue_read_pos[CONFIG_ATS_GROUP_INSTANCES];
-    int queue_write_pos[CONFIG_ATS_GROUP_INSTANCES];
+    const struct net_pkt *queue[CONFIG_ATS_QUEUE_LENGTH + 1];   // pointer to packet queue
+    int64_t queueElegibilityTimes[CONFIG_ATS_QUEUE_LENGTH + 1]; // scheduler ids of packets in queue
+    int queueConsumerIndex;
+    int queueProducerIndex;
+    int64_t groupElegibilityTime;
 };
 
 struct ats
 {
-    struct ats_scheduler scheduler;
-    struct ats_groups groups;
+    struct ats_scheduler scheduler[CONFIG_ATS_SCHEDULER_INSTANCES];
+    struct ats_groups groups[CONFIG_ATS_GROUP_INSTANCES];
     struct net_if *iface;
 };
 

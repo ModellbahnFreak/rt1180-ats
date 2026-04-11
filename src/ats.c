@@ -1,14 +1,9 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
-
-// #include <zephyr/net/socket.h>
-// #include <zephyr/net/ethernet.h>
-// #include <zephyr/net/net_mgmt.h>
-#include <zephyr/posix/sys/socket.h>
-// #include <zephyr/posix/unistd.h>
-
 #include "ats.h"
+
+#define TIME_NS 1000000000
 
 LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
 
@@ -39,7 +34,10 @@ struct ats *ats_init(struct net_if *iface)
 
     __ASSERT(newInst != NULL, "no free ats instance found in ats_init");
 
-    memset(newInst->scheduler.schedulerGroup, CONFIG_ATS_GROUP_INSTANCES, CONFIG_ATS_SCHEDULER_INSTANCES);
+    for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
+    {
+        newInst->scheduler[i].schedulerGroup = CONFIG_ATS_GROUP_INSTANCES;
+    }
 
     return newInst;
 }
@@ -65,7 +63,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     int schedulerId = -1;
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
-        if (ats_data->scheduler.tokensPerSecond[i] == 0)
+        if (ats_data->scheduler[i].tokensPerSecond == 0)
         {
             schedulerId = i;
             break;
@@ -79,7 +77,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     {
         for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
         {
-            if (ats_data->scheduler.schedulerGroup[schedulerId] == CONFIG_ATS_GROUP_INSTANCES)
+            if (ats_data->scheduler[schedulerId].schedulerGroup == CONFIG_ATS_GROUP_INSTANCES)
             {
                 groupId = i;
                 LOG_DBG("found free group %d for scheduler %d", groupId, schedulerId);
@@ -88,26 +86,65 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
         }
         __ASSERT(groupId >= 0, "no free group without scheduler found to assign to instance %d", schedulerId);
     }
-    ats_data->scheduler.bucketEmptyTime[schedulerId] = 0;
-    ats_data->scheduler.tokensPerSecond[schedulerId] = tokensPerSecond;
-    ats_data->scheduler.burstSize[schedulerId] = burstSize;
-    ats_data->scheduler.schedulerGroup[schedulerId] = groupId;
+    ats_data->scheduler[schedulerId].bucketEmptyTime = 0;
+    ats_data->scheduler[schedulerId].tokensPerSecond = tokensPerSecond;
+    ats_data->scheduler[schedulerId].burstSize = burstSize;
+    ats_data->scheduler[schedulerId].schedulerGroup = groupId;
+    ats_data->scheduler[schedulerId].emptyToFullTimeNs = burstSize * TIME_NS / tokensPerSecond;
 
     return schedulerId;
 }
 
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
-    size_t len = net_pkt_get_len(pkt);
+    // todo: make ats access thread safe!
+
+    int64_t arrivalNs = k_uptime_ticks() * TIME_NS / CONFIG_SYS_CLOCK_TICKS_PER_SEC; // todo check if enough granularity or use counters/timerts (general purpose timer or ptp_clock)
+    size_t pktSize = net_pkt_get_len(pkt);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
-    __ASSERT(ats_data->scheduler.tokensPerSecond[schedId] > 0, "ATS instance %d not registered/initialized", schedId);
-    __ASSERT(len <= ats_data->scheduler.burstSize[schedId], "packet size %d exeeds burst size %d of ATS %d", len, ats_data->scheduler.burstSize[schedId], schedId);
+    __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);
+    __ASSERT(pktSize <= ats_data->scheduler[schedId].burstSize, "packet size %d exeeds burst size %d of ATS %d", pktSize, ats_data->scheduler[schedId].burstSize, schedId);
 #endif
 
-    net_pkt_set_iface(pkt, ats_data->iface);
+    uint8_t groupId = ats_data->scheduler[schedId].schedulerGroup;
+    if (ats_data->groups[groupId].queueProducerIndex - ats_data->groups[groupId].queueConsumerIndex >= CONFIG_ATS_QUEUE_LENGTH)
+    {
+        // packet queue full, can't process packet (even if it were immediately elegible)
+        // todo: ckeck if head of queue elegible to clear spot in queue
+        return -1; // todo: proper error codes
+    }
 
-    return net_send_data(pkt);
+    int64_t pktRecoveryTimeNs = pktSize * TIME_NS / ats_data->scheduler[schedId].tokensPerSecond;
+    int64_t schedulerElegebilityTimeNs = ats_data->scheduler[schedId].bucketEmptyTime + pktRecoveryTimeNs;
+    int64_t elegebilityTimeNs = max(max(arrivalNs, schedulerElegebilityTimeNs), ats_data->groups[groupId].groupElegibilityTime);
+    ats_data->groups[groupId].groupElegibilityTime = elegebilityTimeNs;
+
+    int64_t bucketFullTime = ats_data->scheduler[schedId].bucketEmptyTime + ats_data->scheduler[schedId].emptyToFullTimeNs;
+    if (elegebilityTimeNs < bucketFullTime)
+    {
+        // bucket wasn't full yet => remove pktSize tokens from bucket by moving bucketEmptyTime
+        ats_data->scheduler[schedId].bucketEmptyTime = schedulerElegebilityTimeNs;
+    }
+    else
+    {
+        // bucket was full => subtrack pktSize tokens from bucket and set bucketEmptyTime accurdingly
+        ats_data->scheduler[schedId].bucketEmptyTime = elegebilityTimeNs - ats_data->scheduler[schedId].emptyToFullTimeNs + pktRecoveryTimeNs;
+    }
+
+    if (schedulerElegebilityTimeNs <= arrivalNs)
+    {
+        // packet immediately elegible => no need to enqueue
+        net_pkt_set_iface(pkt, ats_data->iface);
+        return net_send_data(pkt);
+    }
+    else
+    {
+        // packet elegible in future => queue
+        uint8_t queueIndex = ats_data->groups[groupId].queueProducerIndex++;
+        ats_data->groups[groupId].queue[queueIndex] = pkt; // todo: handle net_pkt ref count/pass ref (see https://docs.zephyrproject.org/latest/connectivity/networking/api/net_pkt.html#concurrency-and-thread-safety)
+        ats_data->groups[groupId].queueElegibilityTimes[queueIndex] = elegebilityTimeNs;
+    }
 
     return 0;
 }

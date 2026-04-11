@@ -19,6 +19,7 @@ config ATS_GROUP_INSTANCES
 config ATS_QUEUE_LENGTH
     int "Size of queue for every ATS group"
     default 5
+	range 1 255
 	help
 	  The size of the queue/ring buffer for every ATS scheduler group.
 	  If the queue is full and more packets arrive for the 
