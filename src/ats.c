@@ -95,10 +95,30 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     return schedulerId;
 }
 
+int ats_process_queue(struct ats *ats_data, uint8_t groupId, int64_t now)
+{
+    // todo: check if thread safe?
+    // todo: make index access atomic? => what if preempted after reading consumer index BY TIMER?
+    size_t consumerIndex = ats_data->groups[groupId].queueConsumerIndex;
+    while (consumerIndex != ats_data->groups[groupId].queueProducerIndex)
+    {
+        if (ats_data->groups[groupId].queueElegibilityTimes[consumerIndex] <= now)
+        {
+            struct net_pkt *pkt = ats_data->groups[groupId].queue[consumerIndex];
+            net_pkt_set_iface(pkt, ats_data->iface);
+            int newRet = net_send_data(pkt);
+            if (newRet != 0)
+            {
+                return newRet;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
-    // todo: make ats access thread safe!
-
     int64_t arrivalNs = k_uptime_ticks() * TIME_NS / CONFIG_SYS_CLOCK_TICKS_PER_SEC; // todo check if enough granularity or use counters/timerts (general purpose timer or ptp_clock)
     size_t pktSize = net_pkt_get_len(pkt);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
@@ -106,6 +126,11 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);
     __ASSERT(pktSize <= ats_data->scheduler[schedId].burstSize, "packet size %d exeeds burst size %d of ATS %d", pktSize, ats_data->scheduler[schedId].burstSize, schedId);
 #endif
+
+    // start of non preemtrible block (only works on single core processors)
+    k_tid_t currThread = k_current_get();
+    int oldPrio = k_thread_priority_get(currThread);
+    k_thread_priority_set(currThread, min(-1, oldPrio));
 
     uint8_t groupId = ats_data->scheduler[schedId].schedulerGroup;
     if (ats_data->groups[groupId].queueProducerIndex - ats_data->groups[groupId].queueConsumerIndex >= CONFIG_ATS_QUEUE_LENGTH)
@@ -145,6 +170,8 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         ats_data->groups[groupId].queue[queueIndex] = pkt; // todo: handle net_pkt ref count/pass ref (see https://docs.zephyrproject.org/latest/connectivity/networking/api/net_pkt.html#concurrency-and-thread-safety)
         ats_data->groups[groupId].queueElegibilityTimes[queueIndex] = elegebilityTimeNs;
     }
+
+    k_thread_priority_set(currThread, oldPrio);
 
     return 0;
 }

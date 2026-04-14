@@ -18,8 +18,8 @@ struct ats_groups
 {
     const struct net_pkt *queue[CONFIG_ATS_QUEUE_LENGTH + 1];   // pointer to packet queue
     int64_t queueElegibilityTimes[CONFIG_ATS_QUEUE_LENGTH + 1]; // scheduler ids of packets in queue
-    int queueConsumerIndex;
-    int queueProducerIndex;
+    size_t queueConsumerIndex;
+    size_t queueProducerIndex;
     int64_t groupElegibilityTime;
 };
 
