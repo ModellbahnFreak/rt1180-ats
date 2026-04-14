@@ -3,7 +3,7 @@
 #include <zephyr/sys/__assert.h>
 #include "ats.h"
 
-#define TIME_NS 1000000000
+#define TIME_NS 1000000000LL
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
 
 LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
@@ -128,6 +128,7 @@ int ats_process_queue(struct ats_group *group, int64_t now)
         int64_t timeUntilElegible = group->queueElegibilityTimes[group->queueConsumerIndex] - now;
         if (timeUntilElegible <= 0)
         {
+            LOG_DBG("Dequeue packet from group %p", group);
             struct net_pkt *pkt = group->queue[group->queueConsumerIndex];
             int newRet = ats_send_iface(group, pkt);
             if (newRet != 0)
@@ -158,7 +159,7 @@ void ats_timer_expiry(struct k_timer *timer)
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
     int64_t arrivalNs = k_uptime_ticks() * TIME_NS / CONFIG_SYS_CLOCK_TICKS_PER_SEC; // todo check if enough granularity or use counters/timerts (general purpose timer or ptp_clock)
-    size_t pktSize = net_pkt_get_len(pkt);
+    size_t pktSize = net_pkt_get_len(pkt); // todo: packet size doesn't include mac header?
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
     __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);
@@ -179,7 +180,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         return -1; // todo: proper error codes
     }
 
-    int64_t pktRecoveryTimeNs = pktSize * TIME_NS / ats_data->scheduler[schedId].tokensPerSecond;
+    int64_t pktRecoveryTimeNs = ((uint64_t)pktSize) * TIME_NS / ats_data->scheduler[schedId].tokensPerSecond;
     int64_t schedulerElegebilityTimeNs = ats_data->scheduler[schedId].bucketEmptyTime + pktRecoveryTimeNs;
     int64_t elegebilityTimeNs = max(max(arrivalNs, schedulerElegebilityTimeNs), ats_data->group[groupId].groupElegibilityTime); // todo: handle time rollover?!
     ats_data->group[groupId].groupElegibilityTime = elegebilityTimeNs;
@@ -200,6 +201,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     if (elegebilityTimeNs <= arrivalNs)
     {
         // packet immediately elegible => no need to enqueue; can only happen if queue has no packets that also are elegible
+        LOG_DBG("Packet from sched %d, group %d = %p immediately elegible", schedId, groupId, &(ats_data->group[groupId]));
         ret = ats_send_iface(&(ats_data->group[groupId]), pkt);
 #if CONFIG_ATS_LOG_LEVEL >= LOG_LEVEL_ERR
         if (ret != 0)
@@ -211,6 +213,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     else
     {
         // packet elegible in future => queue
+        LOG_DBG("Enqueue packet from sched %d, group %d = %p", schedId, groupId, &(ats_data->group[groupId]));
         uint8_t queueIndex = ats_data->group[groupId].queueProducerIndex;
         ats_data->group[groupId].queue[queueIndex] = pkt; // todo: handle net_pkt ref count/pass ref (see https://docs.zephyrproject.org/latest/connectivity/networking/api/net_pkt.html#concurrency-and-thread-safety)
         ats_data->group[groupId].queueElegibilityTimes[queueIndex] = elegebilityTimeNs;
@@ -220,6 +223,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
             // queue was empty (before this pkt) => no timer is running
             // thread safe as here we can only be preempted by the timer which would also (re)start the timer because this pkt is already written to the queue
             // AND we can't be preempted by the timer if it's not running (as we are in the critical section)
+            LOG_DBG("Started timer for group %d, %d ns", groupId, (int)(elegebilityTimeNs - arrivalNs));
             k_timer_start(&(ats_data->group[groupId].sendTimer), K_NSEC(elegebilityTimeNs - arrivalNs) /*todo: timer with absolute time?!*/, K_NO_WAIT);
         }
     }
