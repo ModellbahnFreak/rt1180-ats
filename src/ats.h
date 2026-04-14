@@ -14,19 +14,21 @@ struct ats_scheduler
     uint8_t schedulerGroup;
 };
 
-struct ats_groups
+struct ats_group
 {
-    const struct net_pkt *queue[CONFIG_ATS_QUEUE_LENGTH + 1];   // pointer to packet queue
+    struct net_pkt *queue[CONFIG_ATS_QUEUE_LENGTH + 1];         // pointer to packet queue
     int64_t queueElegibilityTimes[CONFIG_ATS_QUEUE_LENGTH + 1]; // scheduler ids of packets in queue
-    size_t queueConsumerIndex;
-    size_t queueProducerIndex;
+    size_t queueConsumerIndex;                                  // next queue index to be read
+    size_t queueProducerIndex;                                  // next queue index to be filled
     int64_t groupElegibilityTime;
+    struct k_timer sendTimer;
+    struct ats *parent;
 };
 
 struct ats
 {
     struct ats_scheduler scheduler[CONFIG_ATS_SCHEDULER_INSTANCES];
-    struct ats_groups groups[CONFIG_ATS_GROUP_INSTANCES];
+    struct ats_group group[CONFIG_ATS_GROUP_INSTANCES];
     struct net_if *iface;
 };
 
