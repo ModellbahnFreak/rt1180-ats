@@ -15,6 +15,7 @@ LOG_MODULE_REGISTER(net_pkt_sock_sample, LOG_LEVEL_DBG);
 #include <zephyr/net/socket.h>
 #include <zephyr/net/ethernet.h>
 #include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/dsa_core.h>
 
 #include <zephyr/posix/sys/socket.h>
 #include <zephyr/posix/unistd.h>
@@ -37,7 +38,8 @@ LOG_MODULE_REGISTER(net_pkt_sock_sample, LOG_LEVEL_DBG);
 
 #define FLOOD (CONFIG_NET_SAMPLE_SEND_WAIT_TIME ? 0 : 1)
 
-#define LAN_NODE DT_ALIAS(lan)
+#define LAN_NODE DT_ALIAS(ethpseudo)
+int port_idx = 3;
 
 static struct k_sem quit_lock;
 
@@ -50,6 +52,7 @@ static struct packet_data sock_packet;
 static bool finish;
 static K_SEM_DEFINE(iface_up, 0, 1);
 const struct device *if_dev_a = DEVICE_DT_GET(LAN_NODE);
+struct net_if *iface;
 
 static void send_packet(void);
 
@@ -96,10 +99,33 @@ static int start_socket(int *sock, int if_idx)
 	return 0;
 }
 
+static void find_actual_iface()
+{
+	iface = net_if_lookup_by_dev(if_dev_a);
+
+	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET))
+	{
+		LOG_ERR("Interface not an ethernet interface!");
+		return;
+	}
+
+	if ((net_eth_get_hw_capabilities(iface) & ETHERNET_DSA_CONDUIT_PORT))
+	{
+		struct net_if *user = dsa_user_get_iface(iface, port_idx);
+		if (user == NULL)
+		{
+			LOG_ERR("Port %d of DSA interface not found", port_idx);
+			return;
+		}
+		LOG_INF("User interface %d found.", net_if_get_by_iface(user));
+
+		iface = user;
+		return;
+	}
+}
+
 static void send_packet(void)
 {
-	struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
-
 	int ret;
 	int if_a = net_if_get_by_iface(iface);
 
@@ -148,7 +174,7 @@ static void iface_up_handler(struct net_mgmt_event_callback *cb,
 static void wait_for_interface(void)
 {
 	// struct net_if *iface = net_if_get_default();
-	struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
+	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
 	struct net_mgmt_event_callback iface_up_cb;
 
 	if (net_if_is_up(iface))
@@ -172,14 +198,14 @@ static struct k_thread sender_thread_data[5];
 int sender_threads_count = 0;
 static struct sender_params sender_thread_params[5];
 
-void start_sender(struct net_if *iface, uint16_t maxPacket, uint32_t minT, uint32_t maxT, bool regular)
+void start_sender(struct net_if *iface, uint16_t maxPacket, uint32_t minTUs, uint32_t maxTUs, bool regular)
 {
 	int i = sender_threads_count++;
 	struct sender_params *params = &sender_thread_params[i];
 	params->iface = iface;
 	params->maxPacket = maxPacket;
-	params->maxIntervalUs = maxT;
-	params->minIntervalUs = minT;
+	params->maxIntervalUs = maxTUs;
+	params->minIntervalUs = minTUs;
 	params->regular = regular;
 
 	k_tid_t sender_thread_id = k_thread_create(
@@ -192,7 +218,8 @@ int main(void)
 {
 	LOG_WRN("Hello world!");
 
-	struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
+	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
+	find_actual_iface();
 	// todo? auto init for iface
 	ats_init(iface);
 
@@ -202,8 +229,14 @@ int main(void)
 
 	LOG_INF("Packet socket sample is running");
 
-	start_sender(iface, 100, 1000000, 2000000, true);
-	start_sender(iface, 100, 1000000, 2000000, false);
+	/*int i = sender_threads_count++;
+	k_tid_t speedtest_thread_id = k_thread_create(
+		&sender_thread_data[i], &sender_thread_stack[i][0], STACK_SIZE,
+		sender_speedtest, iface, NULL, NULL,
+		THREAD_PRIORITY, 0, K_NO_WAIT);*/
+
+	 start_sender(iface, 1486, 1000000, 2000000, true);
+	//  start_sender(iface, 100, 1000000, 2000000, false);
 
 	// k_thread_start(send_help_thread_id);
 
