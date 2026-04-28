@@ -171,7 +171,7 @@ int ats_process_queue(struct ats_group *group, int64_t now)
             return 0;
         }
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
-        __ASSERT(pkt.elegibilityTime >= now, "head of queue was not elegible yet when calling ats_process_queue. elegibilityTime %d, now: %d", pkt.elegibilityTime, now);
+        __ASSERT(pkt.elegibilityTime <= now, "head of queue was not elegible yet when calling ats_process_queue. elegibilityTime %" PRId64 ", now: %" PRId64 "", pkt.elegibilityTime, now);
 #endif
 
         ret = ats_send_iface(group, pkt.packet);
@@ -195,12 +195,12 @@ int ats_process_queue(struct ats_group *group, int64_t now)
         int64_t nextElegible = pkt.elegibilityTime;
         timeUntilElegible = nextElegible - now;
 
-        LOG_DBG("group %p, new len %d, next elegibility time %d", group, oldLen - 1, nextElegible);
+        LOG_DBG("group %p, new len %d, next elegibility time %" PRId64, group, oldLen - 1, nextElegible);
     }
 
     // queue not empty but next packet not elegible yet
     k_timer_start(&(group->sendTimer), K_NSEC(timeUntilElegible) /*todo: timer with absolute time?!*/, K_NO_WAIT);
-    LOG_DBG("group %p, next elegibility time %d, timer set for %d ns", group, (int)timeUntilElegible);
+    LOG_DBG("group %p, timer set for %" PRId64 " ns", group, (int)timeUntilElegible);
     return ret;
 }
 
@@ -245,7 +245,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         return 0;
     }
 
-    LOG_DBG("group %d, enqueued paket, new len: %d, next elegibility time %d, empty before", groupId, oldLen + 1, packet.elegibilityTime);
+    LOG_DBG("group %d, enqueued paket, new len: %d, next elegibility time %" PRId64 ", empty before", groupId, oldLen + 1, packet.elegibilityTime);
 
     if (packet.elegibilityTime <= arrivalNs)
     {
@@ -257,7 +257,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         // packet isn't elegible yet and no tier is running (queue was empty) => start timer
         int64_t timeUntilElegible = packet.elegibilityTime - arrivalNs;
         k_timer_start(&(ats_data->group[groupId].sendTimer), K_NSEC(timeUntilElegible) /*todo: timer with absolute time?!*/, K_NO_WAIT);
-        LOG_DBG("group %p, timer set for %d ns, no timer running before", groupId, packet.elegibilityTime, (int)timeUntilElegible);
+        LOG_DBG("group %p, timer set for %" PRId64 " ns, no timer running before", groupId, timeUntilElegible);
         return 0;
     }
 }
