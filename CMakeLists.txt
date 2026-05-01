@@ -7,5 +7,8 @@ project(rt1180-ats)
 target_sources(app PRIVATE src/main.c)
 target_sources(app PRIVATE src/sender.c)
 target_sources(app PRIVATE src/ats.c)
+if(CONFIG_ATS_VERIFY_ENABLED)
+    target_sources(app PRIVATE src/ats_verify.c)
+endif()
 
 zephyr_linker_sources(DATA_SECTIONS src/ats.ld)

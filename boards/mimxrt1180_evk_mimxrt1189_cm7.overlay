@@ -9,6 +9,7 @@
 		eth3 = &switch_port3;
 		eth4 = &enetc_psi0;
 		ethpseudo = &enetc_psi1;
+		time = &gpt1;
 	};
 
 	soc {
@@ -36,4 +37,10 @@
 	switch_port@0 {
 		status = "okay";
 	};
+};
+
+&gpt1 {
+	status = "okay";
+	gptfreq = <DT_FREQ_M(240)>;
+	run-mode = "free-run";
 };

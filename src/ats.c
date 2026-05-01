@@ -1,7 +1,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
+#include <zephyr/drivers/counter.h>
 #include "ats.h"
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+#include "ats_verify.h"
+#endif
 
 #define TIME_NS 1000000000LL
 #define TIME_INVALID -1LL
@@ -17,6 +21,9 @@ LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
 // Actual instances of ats struct in iterable struct section
 STRUCT_SECTION_ITERABLE(ats, ats_instance_0);
 
+#define ATS_COUNTER DT_ALIAS(time)
+const static struct device *ats_counter_dev = DEVICE_DT_GET(ATS_COUNTER);
+
 void ats_timer_expiry(struct k_timer *timer);
 
 struct ats *ats_init(struct net_if *iface)
@@ -29,6 +36,12 @@ struct ats *ats_init(struct net_if *iface)
     {
         LOG_DBG("a structure was already allocated for the iface");
         return newInst;
+    }
+
+    if (!device_is_ready(ats_counter_dev))
+    {
+        LOG_ERR("gpt device not ready");
+        return NULL;
     }
 
     STRUCT_SECTION_FOREACH(ats, instance)
@@ -121,6 +134,9 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt)
     // todo: assert correctness here
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
+#ifdef ATS_VERIFY_ENABLED
+    ats_verify_packet_sent(group->parent, group, net_pkt_get_len(pkt));
+#endif
     return net_send_data(pkt);
 }
 
@@ -213,8 +229,15 @@ void ats_timer_expiry(struct k_timer *timer)
 
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
-    int64_t arrivalNs = k_uptime_ticks() * TIME_NS / CONFIG_SYS_CLOCK_TICKS_PER_SEC; // todo check if enough granularity or use counters/timerts (general purpose timer or ptp_clock)
-    size_t pktSize = net_pkt_get_len(pkt);                                           // todo: packet size doesn't include mac header?
+    uint64_t arrivalNs = 0;
+    int res = counter_get_value_64(ats_counter_dev, &arrivalNs);
+    if (res)
+    {
+        LOG_ERR("Error reading current time: %d", res);
+        return -1;
+    }
+    arrivalNs = counter_ticks_to_ns_64(ats_counter_dev, arrivalNs);
+    size_t pktSize = net_pkt_get_len(pkt); // todo: packet size doesn't include mac header?
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
     __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);

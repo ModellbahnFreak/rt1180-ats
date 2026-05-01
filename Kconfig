@@ -35,4 +35,18 @@ config ATS_ASSERT_ON_SEND
 	  Defines wether the ATS send path should perform assertions to check validity of parameters etc.
 	  This causes some performace hit, it is useful for debugging but should be disabled in production
 
+config ATS_VERIFY_ENABLED
+	bool "Enable ats correctness verification"
+	default n
+	help
+	  Enable this to check and log correctness of ATS packet sending.
+	  This will start another (low prio) thread that does the verification by tracking the bucket states separately
+
+config ATS_VERIFY_LOG_LEVEL
+	int "Log level for ATS verification"
+	default 3
+	help
+	  The verbosity of the ATS verification.
+	  0: none, 1: only errors in verifyer code, 2: warn if ATS did not comply to specification, 3: regular info of bucket states, 4: debug info from verifyer
+
 source "Kconfig.zephyr"
