@@ -109,6 +109,7 @@ static void find_actual_iface()
 		return;
 	}
 
+#ifdef CONFIG_NET_DSA
 	if ((net_eth_get_hw_capabilities(iface) & ETHERNET_DSA_CONDUIT_PORT))
 	{
 		struct net_if *user = dsa_user_get_iface(iface, port_idx);
@@ -122,6 +123,7 @@ static void find_actual_iface()
 		iface = user;
 		return;
 	}
+#endif
 }
 
 static void send_packet(void)
@@ -162,26 +164,26 @@ static void send_packet(void)
 	LOG_DBG("Helper thread exiting");
 }
 
-static void iface_up_handler(struct net_mgmt_event_callback *cb,
-							 uint64_t mgmt_event, struct net_if *iface)
+static void iface_up_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *changed_iface) //(uint64_t mgmt_event, struct net_if *changed_iface, void *info, size_t info_length, void *user_data)
 {
-	if (mgmt_event == NET_EVENT_IF_UP)
+	if (mgmt_event == NET_EVENT_IF_UP && changed_iface->if_dev->dev == iface->if_dev->dev)
 	{
 		k_sem_give(&iface_up);
 	}
 }
 
+// NET_MGMT_REGISTER_EVENT_HANDLER(iface_up_cb, NET_EVENT_IF_UP, iface_up_handler, NULL);
 static void wait_for_interface(void)
 {
 	// struct net_if *iface = net_if_get_default();
 	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
-	struct net_mgmt_event_callback iface_up_cb;
 
 	if (net_if_is_up(iface))
 	{
 		return;
 	}
 
+	struct net_mgmt_event_callback iface_up_cb;
 	net_mgmt_init_event_callback(&iface_up_cb, iface_up_handler,
 								 NET_EVENT_IF_UP);
 	net_mgmt_add_event_callback(&iface_up_cb);

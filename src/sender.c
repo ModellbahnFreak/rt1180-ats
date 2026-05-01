@@ -31,8 +31,32 @@ extern struct netc_eth_data
 #endif
 };
 
-// AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t sender_buf[1500], 64);
-NET_BUF_SIMPLE_DEFINE_STATIC(sender_buf, 1500);
+extern struct netc_eth_config
+{
+    DEVICE_MMIO_NAMED_ROM(port);
+    DEVICE_MMIO_NAMED_ROM(pfconfig);
+    uint16_t si_idx;
+    const struct device *phy_dev;
+    netc_hw_mii_mode_t phy_mode;
+    volatile bool pseudo_mac;
+    void (*generate_mac)(uint8_t *mac_addr);
+    void (*bdr_init)(netc_bdr_config_t *bdr_config, netc_rx_bdr_config_t *rx_bdr_config,
+                     netc_tx_bdr_config_t *tx_bdr_config);
+    const struct pinctrl_dev_config *pincfg;
+#ifdef CONFIG_ETH_NXP_IMX_NETC_MSI_GIC
+    const struct device *msi_dev;
+    uint8_t msi_device_id; /* MSI device ID */
+#else
+    uint8_t tx_intr_msg_data;
+    uint8_t rx_intr_msg_data;
+#endif
+#ifdef NETC_PTP_TIMESTAMPING_SUPPORT
+    const struct device *ptp_clock;
+#endif
+};
+
+AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t aligned_sender_buf[1500], 64);
+NET_BUF_SIMPLE_DEFINE_STATIC(sender_buf, 1);
 
 void sender_speedtest(void *if_param, void *p2, void *p3)
 {
@@ -41,7 +65,7 @@ void sender_speedtest(void *if_param, void *p2, void *p3)
     struct net_if *iface = (struct net_if *)if_param;
     LOG_INF("speedtest started");
 
-    uint8_t *buf = net_buf_data_sender_buf;
+    uint8_t *buf = aligned_sender_buf;
     for (size_t i = 0; i < 1500; i++)
     {
         buf[i] = 0xff;
@@ -50,32 +74,48 @@ void sender_speedtest(void *if_param, void *p2, void *p3)
     *((uint32_t *)(buf + 14)) = 0;
 
     const struct device *dev = net_if_get_device(iface);
-    struct dsa_switch_context *dsa_switch_ctx = dev->data;
-    const struct device *conduitDev = net_if_get_device(dsa_switch_ctx->iface_conduit);
-    struct netc_eth_data *data = conduitDev->data;
+    struct netc_eth_data *data = dev->data;
+#ifdef CONFIG_NET_DSA
+    const struct netc_eth_config *cfg = dev->config;
+    int dst_port = -1;
+    if (cfg->pseudo_mac)
+    {
+        struct dsa_switch_context *dsa_switch_ctx = dev->data;
+        const struct device *conduitDev = net_if_get_device(dsa_switch_ctx->iface_conduit);
+        data = conduitDev->data;
+        const struct dsa_port_config *port_cfg = dev->config;
+        dst_port = port_cfg->port_idx;
+    }
+#endif
     netc_buffer_struct_t buff = {.buffer = buf, .length = 1500};
     netc_frame_struct_t frame = {.buffArray = &buff, .length = 1};
     ep_tx_opt opt = {0};
-
-    const struct dsa_port_config *port_cfg = dev->config;
-    const int dst_port = port_cfg->port_idx;
+    int errSum = 0;
 
     while (true)
     {
         netc_tx_bd_t txDesc[2] = {0};
         NETC_ClearTxDescriptor(&txDesc[0]);
         NETC_ClearTxDescriptor(&txDesc[1]);
-        txDesc[0].standard.flags = NETC_SI_TXDESCRIP_RD_FLQ(2) |
-                                   NETC_SI_TXDESCRIP_RD_SMSO_MASK |
-                                   NETC_SI_TXDESCRIP_RD_PORT(dst_port);
+#ifdef CONFIG_NET_DSA
+        if (dst_port != -1)
+        {
+            txDesc[0].standard.flags = NETC_SI_TXDESCRIP_RD_FLQ(2) |
+                                       NETC_SI_TXDESCRIP_RD_SMSO_MASK |
+                                       NETC_SI_TXDESCRIP_RD_PORT(dst_port);
+        }
+#endif
         status_t result = EP_SendFrameCommon(&data->handle, &data->handle.txBdRing[0], 0, &frame,
                                              NULL, &txDesc[0], data->handle.cfg.txCacheMaintain);
 
         // status_t result = EP_SendFrame(&data->handle, 0, &frame, NULL, &opt);
         if (result)
         {
-            LOG_ERR("Send error: %d", result);
+            errSum += result;
+            *((uint32_t *)(buf + 22)) = errSum;
+            // LOG_ERR("Send error: %d", result);
         }
+        *((uint32_t *)(buf + 18)) = result;
         *((uint32_t *)(buf + 14)) += 1;
     }
 }
@@ -100,9 +140,9 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
     if (params->regular)
     {
-        // ######Regular packet allocation
-        // struct net_pkt *pkt = net_pkt_alloc_with_buffer(params->iface, params->maxPacket, NET_AF_UNSPEC, 0, K_FOREVER);
+        // #define useStaticBuf
 
+#ifdef useStaticBuf
         // ###### Alternative: Use static (contiguous) buffer
         struct net_pkt *pkt = net_pkt_alloc_on_iface(params->iface, K_FOREVER);
         struct net_buf buf_inst = {
@@ -120,16 +160,28 @@ void sender(void *sender_parameters, void *p2, void *p3)
         net_pkt_set_ll_proto_type(pkt, 0x0842);
         net_pkt_memset(pkt, 5, params->maxPacket);
         *((uint32_t *)(net_buf_data_sender_buf + 14)) = 0;
+#else
+        int i = 0;
+#endif
+
         while (true)
         {
+#ifdef useStaticBuf
             buf->data = buf->__buf + 14; // reserve space for ethernet headers, reference get_reserve_ll_header_size; can't use net_buf_reserve as it requires the buffer to be empty but we want to overwrite
             buf->len = params->maxPacket;
             net_pkt_ref(pkt);
+#else
+            // ######Regular packet allocation
+            struct net_pkt *pkt = net_pkt_alloc_with_buffer(params->iface, params->maxPacket, NET_AF_UNSPEC, 0, K_FOREVER);
+            net_pkt_set_ll_proto_type(pkt, 0x0842);
+            net_pkt_write_le32(pkt, i++);
+            net_pkt_memset(pkt, 5, params->maxPacket);
+#endif
 
             LOG_INF("App %d trying to send %d bytes, then waiting %d us", (int)appId, net_pkt_get_len(pkt), params->maxIntervalUs);
-            // ats_send(ats_data, schedId, pkt);
-            // k_sleep(K_USEC(params->maxIntervalUs));
-            net_send_data(pkt);
+            ats_send(ats_data, schedId, pkt);
+            k_sleep(K_USEC(params->minIntervalUs));
+            // net_send_data(pkt);
             *((uint32_t *)(net_buf_data_sender_buf + 14)) += 1;
         }
     }
@@ -137,7 +189,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
     {
         while (true)
         {
-            uint16_t pkgSize = sys_rand16_get() % params->maxPacket;
+            uint16_t pkgSize = /*sys_rand16_get() %*/ params->maxPacket;
             uint32_t sleepTime = (sys_rand32_get() % (params->maxIntervalUs - params->minIntervalUs)) + params->minIntervalUs;
             struct net_pkt *pkt = net_pkt_alloc_with_buffer(params->iface, pkgSize, NET_AF_UNSPEC, 0, K_FOREVER);
             net_pkt_write_be32(pkt, counter++);
