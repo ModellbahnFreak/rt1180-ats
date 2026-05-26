@@ -35,6 +35,15 @@ config ATS_ASSERT_ON_SEND
 	  Defines wether the ATS send path should perform assertions to check validity of parameters etc.
 	  This causes some performace hit, it is useful for debugging but should be disabled in production
 
+config ATS_TIMER_EPSILON_NS
+	int "Number of nanoseconds of allowable jitter for timer updating"
+	default 1000
+	help
+	  The number of nanoseconds to use as tolerance when setting a new timer expiry.
+	  In the case a new packet with elegibility time within this epsilon arrives, it will ony be sent up to this amount of time later.
+	  Required to avoid race condition when setting timer.
+	  MUST be bigger than the time required for thread-lock, isr-lock, timer alarm update and both unlocks
+
 config ATS_VERIFY_ENABLED
 	bool "Enable ats correctness verification"
 	default n

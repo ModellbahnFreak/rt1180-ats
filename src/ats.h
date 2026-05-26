@@ -7,10 +7,10 @@
 
 struct ats_scheduler
 {
-    int64_t bucketEmptyTime;
+    int64_t bucketEmptyTimeTicks;
     uint32_t tokensPerSecond; // committed information rate
     uint32_t burstSize;       // comitted burst size
-    int64_t emptyToFullTimeNs;
+    int64_t emptyToFullTimeTicks;
     uint8_t schedulerGroup;
 };
 
@@ -25,9 +25,9 @@ struct ats_group
     struct k_msgq queue;
     char queueBuffer[CONFIG_ATS_QUEUE_LENGTH * sizeof(struct ats_enqued_packet)]; // (byte) buffer for packet queue
     atomic_t queueLen;
-    int64_t groupElegibilityTime;
+    int64_t groupElegibilityTimeTicks;
+    int64_t queueHeadElegibilityTime;
     struct k_mutex elegibilityTimeMutex;
-    struct k_timer sendTimer;
     struct ats *parent;
 };
 
