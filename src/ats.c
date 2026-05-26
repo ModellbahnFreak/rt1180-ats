@@ -24,7 +24,7 @@
  * CAUTION: This value is only to be used for asserts (not for actual time calculation) as it might not devide cleanly!
  */
 #define TIME_MODULO (TICK_MODULO * TIME_NS / TICKS_PER_SECOND)
-#define CONFIG_ATS_TIMER_EPSILON_TICKS (CONFIG_ATS_TIMER_EPSILON_NS * TICKS_PER_SECOND / TIME_NS)
+#define CONFIG_ATS_TIMER_EPSILON_TICKS ((uint64_t)CONFIG_ATS_TIMER_EPSILON_NS * (uint64_t)TICKS_PER_SECOND / TIME_NS)
 
 #define TIME_INVALID -1LL
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
@@ -36,6 +36,7 @@
 #define TICK_LE(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO < (TICK_MODULO / 2)) ? true : false)
 #define TICK_GT(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO > (TICK_MODULO / 2)) ? true : false)
 #define TICK_MAX(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO < (TICK_MODULO / 2)) ? (b) : (a))
+#define TICK_REL_TIME(a, b) (((b) - (a) + TICK_MODULO) % TICK_MODULO)
 
 #define RETURN_PROCESS_NOW 189 // magic return value for ats_update_counter_alarm to signal to caller to process packet now and no timer was set
 
@@ -93,9 +94,6 @@ struct ats *ats_init(struct net_if *iface)
     for (int i = 0; i < CONFIG_ATS_GROUP_INSTANCES; i++)
     {
         newInst->group[i].parent = newInst;
-        struct k_timer *timer = &(newInst->group[i].sendTimer);
-        k_timer_init(timer, ats_timer_expiry, NULL);
-        k_timer_user_data_set(timer, &(newInst->group[i]));
 
         k_msgq_init(&(newInst->group[i].queue), newInst->group[i].queueBuffer, sizeof(struct ats_enqued_packet), CONFIG_ATS_QUEUE_LENGTH);
         k_mutex_init(&(newInst->group[i].elegibilityTimeMutex));
@@ -105,7 +103,7 @@ struct ats *ats_init(struct net_if *iface)
     struct counter_top_cfg topCfg = {
         .ticks = counter_get_top_value(ats_counter_dev),
         .callback = ats_counter_top_cb};
-    counter_set_top_value(ats_counter_dev, topCfg);
+    counter_set_top_value(ats_counter_dev, &topCfg);
 
     return newInst;
 }
@@ -189,11 +187,10 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
  *
  * WARNING: This function assumes that the current head of the queue is elegible. Must be ensures by caller (timer or check)
  */
-int ats_process_queue(struct ats_group *group, int64_t now)
+int ats_process_queue(struct ats_group *group, uint64_t now)
 {
     int ret = 0;
-    int64_t timeUntilElegible = 0;
-    while (timeUntilElegible <= 0)
+    while (TICK_LE(group->queueHeadElegibilityTime, now))
     {
         LOG_DBG("Dequeue packet from group %p", group);
         struct ats_enqued_packet pkt;
@@ -230,15 +227,11 @@ int ats_process_queue(struct ats_group *group, int64_t now)
         }
 
         // packet in queue => need to send or restart timer
-        int64_t nextElegible = pkt.elegibilityTime;
-        timeUntilElegible = nextElegible - now;
-
-        LOG_DBG("group %p, new len %d, next elegibility time %" PRId64, group, oldLen - 1, nextElegible);
+        group->queueHeadElegibilityTime = pkt.elegibilityTime;
+        LOG_DBG("group %p, new len %d, next elegibility time %" PRId64, group, (int)(oldLen - 1), group->queueHeadElegibilityTime);
     }
 
     // queue not empty but next packet not elegible yet
-    k_timer_start(&(group->sendTimer), K_NSEC(timeUntilElegible) /*todo: timer with absolute time?!*/, K_NO_WAIT);
-    LOG_DBG("group %p, timer set for %" PRId64 " ns", group, (int)timeUntilElegible);
     return ret;
 }
 
@@ -295,11 +288,13 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
         if (TICK_LE(nextElegibilityTime, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS))
         {
             // counter alarm time is past and elegibility time is closer than epsilon => update to now+epsilon
+            LOG_DBG("timer update: update to now+epsilon (" PRId64 "); reason: timer expired and next elegibility time (" PRId64 ") closer than epsilon; N'-E" PRId64, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO, nextElegibilityTime, TICK_REL_TIME(nextElegibilityTime, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO));
             ats_counter_alarm_time = (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO;
         }
         else
         {
             // counter alarm time is past and enough time to elegibility time tto update => update to elegibility time
+            LOG_DBG("timer update: update to next elegibility (" PRId64 "); reason: timer expired and next elegibility not too close; delta: " PRId64, nextElegibilityTime, TICK_REL_TIME(ats_counter_alarm_time, nextElegibilityTime));
             ats_counter_alarm_time = nextElegibilityTime;
         }
     }
@@ -312,6 +307,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
             if (TICK_LE(nextElegibilityTime, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS))
             {
                 // elegibility time already past or too close to update AND counter alarm not within epsilon => update alarm time to now+epsilon
+                LOG_DBG("timer update: update to now+epsilon (" PRId64 "); reason: next elegibility time (" PRId64 ") closer than epsilon; N'-E" PRId64, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO, nextElegibilityTime, TICK_REL_TIME(nextElegibilityTime, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO));
                 ats_counter_alarm_time = (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO;
             }
             else
@@ -320,11 +316,13 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
                 if (TICK_LE(nextElegibilityTime, ats_counter_alarm_time))
                 {
                     // => new elegibility time is closer than current alarm time but far enough to be able to update the alarm time => update alarm to elegibility time
+                    LOG_DBG("timer update: update to next elegibility (" PRId64 "); reason: next elegibility time closer than counter (" PRId64 ") but not too close; C-E=" PRId64, nextElegibilityTime, ats_counter_alarm_time, TICK_REL_TIME(nextElegibilityTime, ats_counter_alarm_time));
                     ats_counter_alarm_time = nextElegibilityTime;
                 }
                 else
                 {
                     // => new elegibility time is farther than next alarm time => no action required
+                    LOG_DBG("timer update: no action; reason: timer not expired, next elegibility time (" PRId64 ") greater than counter (" PRId64 "); E-C" PRId64, nextElegibilityTime, ats_counter_alarm_time, TICK_REL_TIME(ats_counter_alarm_time, nextElegibilityTime));
                     return 0;
                 }
             }
@@ -332,6 +330,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
         else
         {
             // no action (except maybe if E < N; TODO)
+            LOG_DBG("timer update: no action; reason: timer not expired but expiring within <epsilon from now (" PRId64 ")", TICK_REL_TIME(ats_counter_alarm_time, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS));
             return 0;
         }
     }
@@ -404,11 +403,11 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     if (oldLen > 0)
     {
         // queue was not empty => timer already running
-        LOG_DBG("group %d, enqueued packet, new len: %d, timer running", groupId, oldLen + 1);
+        LOG_DBG("group %d, enqueued packet, new len: %d, timer running", groupId, (int)(oldLen + 1));
         return 0;
     }
 
-    LOG_DBG("group %d, enqueued paket, new len: %d, next elegibility time %" PRId64 ", empty before", groupId, oldLen + 1, packet.elegibilityTime);
+    LOG_DBG("group %d, enqueued paket, new len: %d, next elegibility time %" PRId64 ", empty before", groupId, (int)(oldLen + 1), packet.elegibilityTime);
 
     ats_data->group[groupId].queueHeadElegibilityTime = packet.elegibilityTime;
 
@@ -418,7 +417,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     k_sched_unlock();
     if (updateRes == RETURN_PROCESS_NOW)
     {
-        ats_process_queue(ats_data->group[groupId], counterVal);
+        ats_process_queue(&(ats_data->group[groupId]), counterVal);
     }
     // LOG_DBG("group %p, timer set for %" PRId64 " ns, no timer running before", groupId, timeUntilElegible);
     return 0;
