@@ -3,6 +3,8 @@
 
 #include <zephyr/kernel.h>
 
-void ats_verify_packet_sent(void *ats, void *group, uint16_t packetSize);
+void ats_verify_packet_sent(void *streamId, uint16_t packetSize, uint64_t elegibilityTime);
+
+void ats_verify_set_stream_parameters(void *streamId, uint32_t tokensPerSecond, uint32_t burstSize);
 
 #endif

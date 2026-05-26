@@ -169,11 +169,18 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
 }
 
 int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+                   ,
+                   uint64_t elegibilityTime
+#endif
 )
 {
     // todo: assert correctness here
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+    ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
+#endif
     return net_send_data(pkt);
 }
 
