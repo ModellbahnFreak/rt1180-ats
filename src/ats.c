@@ -1,43 +1,17 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
-#include <zephyr/drivers/counter.h>
 #include "ats.h"
 #ifdef CONFIG_ATS_VERIFY_ENABLED
 #include "ats_verify.h"
 #endif
 
-#define ATS_COUNTER DT_ALIAS(time)
-
-#define TIME_NS 1000000000LL
-#define TICKS_PER_SECOND (uint32_t)(DT_PROP(ATS_COUNTER, gptfreq))
-/**
- * The time overflow/modulo in ticks (internal time unit)
- * Equal to casting to uint32 (as thats te overflow of the timer)
- * NOTE: Customization not possible because there would be a mismatch between counter overflow and time overflow
- */
-#define TICK_MODULO 0xffffffffLL
-/**
- * The number of ns it takes the 32bit counter to overflow.
- * (Absolut) Maximum residence duration will be half of this interval as durations longer than that can't be reliably compared.
- *
- * CAUTION: This value is only to be used for asserts (not for actual time calculation) as it might not devide cleanly!
- */
-#define TIME_MODULO (TICK_MODULO * TIME_NS / TICKS_PER_SECOND)
-#define CONFIG_ATS_TIMER_EPSILON_TICKS ((uint64_t)CONFIG_ATS_TIMER_EPSILON_NS * (uint64_t)TICKS_PER_SECOND / TIME_NS)
-
-#define TIME_INVALID -1LL
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
 #define LOG_IF_ERR(err, ...)  \
     if ((err) != 0)           \
     {                         \
         LOG_ERR(__VA_ARGS__); \
     }
-#define TICK_LE(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO < (TICK_MODULO / 2)) ? true : false)
-#define TICK_GT(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO > (TICK_MODULO / 2)) ? true : false)
-#define TICK_MAX(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO < (TICK_MODULO / 2)) ? (b) : (a))
-#define TICK_MIN(a, b) ((((b) - (a) + TICK_MODULO) % TICK_MODULO < (TICK_MODULO / 2)) ? (a) : (b))
-#define TICK_REL_TIME(a, b) (((b) - (a) + TICK_MODULO) % TICK_MODULO)
 
 #define RETURN_PROCESS_NOW 189 // magic return value for ats_update_counter_alarm to signal to caller to process packet now and no timer was set
 
@@ -46,21 +20,16 @@ LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
 // Actual instances of ats struct in iterable struct section
 STRUCT_SECTION_ITERABLE(ats, ats_instance_0);
 
-const static struct device *ats_counter_dev = DEVICE_DT_GET(ATS_COUNTER);
-static uint64_t ats_counter_alarm_time = TIME_INVALID;
-static uint64_t ats_counter_time_msb;
-
 void ats_timer_expiry(struct k_timer *timer);
 
-void ats_counter_top_cb(const struct device *dev, void *user_data);
-void ats_counter_alarm_cb(const struct device *dev, uint8_t chan_id, uint32_t ticks, void *user_data);
+void ats_counter_alarm_cb();
 
 struct ats *ats_init(struct net_if *iface)
 {
     LOG_INF("Initializing ATS struct for iface %s", net_if_get_config(iface)->name);
     LOG_DBG("allocating %d schedulers, %d groups and %d queue slots/group", CONFIG_ATS_SCHEDULER_INSTANCES, CONFIG_ATS_GROUP_INSTANCES, CONFIG_ATS_QUEUE_LENGTH);
     // todo: remove
-    LOG_INF("Counter frequency from DT: %" PRId32 " ; from api: %" PRId32, TICKS_PER_SECOND, counter_get_frequency(ats_counter_dev));
+    LOG_INF("Counter frequency %" PRId32 " Hz; max interval: %" PRIu64 " ticks = %" PRIu64 " ns", TICKS_PER_SECOND, TICK_MAX_INTERVAL, TIME_MODULO / 2);
 
     struct ats *newInst = ats_get_by_net_if(iface);
     if (newInst != NULL)
@@ -69,9 +38,9 @@ struct ats *ats_init(struct net_if *iface)
         return newInst;
     }
 
-    if (!device_is_ready(ats_counter_dev))
+    if (ats_time_init(ats_counter_alarm_cb))
     {
-        LOG_ERR("gpt device not ready");
+        LOG_ERR("counter/timer initialization failed!");
         return NULL;
     }
 
@@ -95,18 +64,12 @@ struct ats *ats_init(struct net_if *iface)
     for (int i = 0; i < CONFIG_ATS_GROUP_INSTANCES; i++)
     {
         newInst->group[i].parent = newInst;
-        newInst->group[i].queueHeadElegibilityTime = TIME_INVALID;
+        newInst->group[i].queueHeadElegibilityTime.valid = false;
 
         k_msgq_init(&(newInst->group[i].queue), newInst->group[i].queueBuffer, sizeof(struct ats_enqued_packet), CONFIG_ATS_QUEUE_LENGTH);
         k_mutex_init(&(newInst->group[i].elegibilityTimeMutex));
         LOG_DBG("For ATS %p: Group %d is %p", newInst, i, &(newInst->group[i]));
     }
-
-    struct counter_top_cfg topCfg = {
-        .ticks = counter_get_top_value(ats_counter_dev),
-        .callback = ats_counter_top_cb};
-    counter_set_top_value(ats_counter_dev, &topCfg);
-    counter_start(ats_counter_dev);
 
     return newInst;
 }
@@ -193,7 +156,8 @@ int ats_process_queue(struct ats_group *group, uint64_t now)
 {
     int ret = 0;
     atomic_val_t oldLen = -1;
-    while (group->queueHeadElegibilityTime != TIME_INVALID && TICK_LE(group->queueHeadElegibilityTime, now))
+    now = TICK_NORMALIZE(now);
+    while (group->queueHeadElegibilityTime.valid && TICK_LE(TICK_NORMALIZE(group->queueHeadElegibilityTime.tick), now))
     {
         LOG_DBG("Dequeue packet from group %p", group);
         struct ats_enqued_packet pkt;
@@ -201,7 +165,7 @@ int ats_process_queue(struct ats_group *group, uint64_t now)
         {
             // no packet in queue => nothing to do
             LOG_DBG("Queue of group %p was empty. Nothing to do", group);
-            group->queueHeadElegibilityTime = TIME_INVALID;
+            group->queueHeadElegibilityTime.valid = false;
             return 0;
         }
 
@@ -218,27 +182,28 @@ int ats_process_queue(struct ats_group *group, uint64_t now)
         {
             // queue empty => no need to calc elegibility time or stat timer
             LOG_DBG("group %p, new len: 0, queue now empty", group);
-            group->queueHeadElegibilityTime = TIME_INVALID;
+            group->queueHeadElegibilityTime.valid = false;
             return 0;
         }
         if (k_msgq_peek(&(group->queue), &pkt) != 0)
         {
             // no packet in queue => nothing to do
             LOG_DBG("group %p, new len: 0, queue now empty. This should not be reachable", group);
-            group->queueHeadElegibilityTime = TIME_INVALID;
+            group->queueHeadElegibilityTime.valid = false;
             return 0;
         }
 
         // packet in queue => need to send or restart timer
-        group->queueHeadElegibilityTime = pkt.elegibilityTime;
-        LOG_DBG("group %p, new len %d, next elegibility time %" PRId64, group, (int)(oldLen - 1), group->queueHeadElegibilityTime);
+        group->queueHeadElegibilityTime.tick = pkt.elegibilityTime;
+        group->queueHeadElegibilityTime.valid = true;
+        LOG_DBG("group %p, new len %d, next elegibility time %" PRId64, group, (int)(oldLen - 1), group->queueHeadElegibilityTime.tick);
     }
 
     // queue not empty but next packet not elegible yet
-    return oldLen != -1 ? oldLen - 1 : (group->queueHeadElegibilityTime == TIME_INVALID ? 0 : 1);
+    return oldLen != -1 ? oldLen - 1 : (group->queueHeadElegibilityTime.valid ? 1 : 0);
 }
 
-uint64_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t pktSize, uint64_t arrivalTick)
+ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t pktSize, uint64_t arrivalTick)
 {
     struct ats_scheduler *sched = &(ats_data->scheduler[schedId]);
     struct ats_group *group = &(ats_data->group[sched->schedulerGroup]);
@@ -246,16 +211,19 @@ uint64_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t
 
     k_mutex_lock(&(group->elegibilityTimeMutex), K_FOREVER);
     uint64_t schedulerElegebilityTimeTicks = sched->bucketEmptyTimeTicks + pktRecoveryTimeTicks;
-    uint64_t elegebilityTimeTicks = max(arrivalTick, max(schedulerElegebilityTimeTicks, group->groupElegibilityTimeTicks));
-    if ((elegebilityTimeTicks - arrivalTick) > TICK_MODULO / 2)
+    ats_time_t elegebilityTime = {
+        .valid = false,
+        .tick = MAX(arrivalTick, MAX(schedulerElegebilityTimeTicks, group->groupElegibilityTimeTicks)),
+    };
+    if (TICK_ILLEGAL_INTERVAL(arrivalTick, elegebilityTime.tick))
     {
         k_mutex_unlock(&(group->elegibilityTimeMutex));
-        return TIME_INVALID;
+        return elegebilityTime;
     }
-    group->groupElegibilityTimeTicks = elegebilityTimeTicks;
+    group->groupElegibilityTimeTicks = elegebilityTime.tick;
 
     uint64_t bucketFullTime = sched->bucketEmptyTimeTicks + sched->emptyToFullTimeTicks;
-    if (elegebilityTimeTicks < bucketFullTime)
+    if (elegebilityTime.tick < bucketFullTime)
     {
         // bucket wasn't full yet => remove pktSize tokens from bucket by moving bucketEmptyTime
         sched->bucketEmptyTimeTicks = schedulerElegebilityTimeTicks;
@@ -263,72 +231,87 @@ uint64_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t
     else
     {
         // bucket was full => subtrack pktSize tokens from bucket and set, bucketEmptyTime accurdingly
-        sched->bucketEmptyTimeTicks = elegebilityTimeTicks - sched->emptyToFullTimeTicks + pktRecoveryTimeTicks;
+        sched->bucketEmptyTimeTicks = elegebilityTime.tick - sched->emptyToFullTimeTicks + pktRecoveryTimeTicks;
     }
     k_mutex_unlock(&(group->elegibilityTimeMutex));
 
-    return elegebilityTimeTicks;
+    elegebilityTime.valid = true;
+    return elegebilityTime;
 }
 
-int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, uint32_t *outUsedNow)
+int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, uint64_t *outUsedNow)
 {
-    uint32_t counterVal;
-    int res = counter_get_value(ats_counter_dev, &counterVal);
-    if (res)
+    uint64_t counterVal;
+    if (outUsedNow == NULL)
     {
-        LOG_ERR("Error reading current time: %d", res);
-        return -1;
+        outUsedNow = &counterVal;
     }
-    if (outUsedNow != NULL)
-    {
-        (*outUsedNow) = counterVal;
-    }
-    if (TICK_LE(nextElegibilityTime, counterVal))
+    ats_time_get(outUsedNow);
+    *outUsedNow = TICK_NORMALIZE(*outUsedNow);
+    nextElegibilityTime = TICK_NORMALIZE(nextElegibilityTime);
+    ats_time_t alarm_time;
+    ats_time_get_alarm(&alarm_time);
+
+    if (TICK_LE(nextElegibilityTime, *outUsedNow))
     {
         LOG_DBG("timer update: packet already elegible, not updating timer");
         return RETURN_PROCESS_NOW;
     }
-    if (timerExpired || ats_counter_alarm_time == TIME_INVALID)
+    if (timerExpired || !alarm_time.valid)
     {
         // if elegibility time is before now + epsilon (closer than time needed to update OR already past)
-        if (TICK_LE(nextElegibilityTime, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS))
+        if (TICK_LE(nextElegibilityTime, *outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS))
         {
             // counter alarm time is past and elegibility time is closer than epsilon => update to now+epsilon
-            LOG_DBG("timer update: update to now+epsilon (%'" PRId64 "); reason: timer expired and next elegibility time (%'" PRId64 ") closer than epsilon; N'-E=%'" PRId64, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO, nextElegibilityTime, TICK_REL_TIME(nextElegibilityTime, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO));
-            ats_counter_alarm_time = (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO;
+            LOG_DBG("timer update: update to now+epsilon (%" PRId64 "); reason: timer expired and next elegibility time (%" PRId64 ") closer than epsilon; N'-E=%" PRId64,
+                    TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS),
+                    nextElegibilityTime,
+                    TICK_REL_TIME(nextElegibilityTime, TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS)));
+            ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
         }
         else
         {
             // counter alarm time is past and enough time to elegibility time to update => update to elegibility time
-            LOG_DBG("timer update: update to next elegibility (%'" PRId64 "); reason: timer expired and next elegibility not too close; E-N=%'" PRId64, nextElegibilityTime, TICK_REL_TIME(counterVal, nextElegibilityTime));
-            ats_counter_alarm_time = nextElegibilityTime;
+            LOG_DBG("timer update: update to next elegibility (%" PRId64 "); reason: timer expired and next elegibility not too close; E-N=%" PRId64,
+                    nextElegibilityTime,
+                    TICK_REL_TIME(*outUsedNow, nextElegibilityTime));
+            ats_time_set_alarm(nextElegibilityTime);
         }
     }
     else
     {
-        // if timer does not expire within the time needed to update it (ats_counter_alarm_time outside epsilon from now)
-        if (TICK_GT(ats_counter_alarm_time, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS))
+        // if timer does not expire within the time needed to update it (alarm_time outside epsilon from now)
+        if (TICK_GT(alarm_time.tick, *outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS))
         {
             // if elegibility time is before now + epsilon (closer than time needed to update OR already past)
-            if (TICK_LE(nextElegibilityTime, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS))
+            if (TICK_LE(nextElegibilityTime, *outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS))
             {
                 // elegibility time already past or too close to update AND counter alarm not within epsilon => update alarm time to now+epsilon
-                LOG_DBG("timer update: update to now+epsilon (%'" PRId64 "); reason: next elegibility time (%'" PRId64 ") closer than epsilon; N'-E=%'" PRId64, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO, nextElegibilityTime, TICK_REL_TIME(nextElegibilityTime, (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO));
-                ats_counter_alarm_time = (counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS) % TICK_MODULO;
+                LOG_DBG("timer update: update to now+epsilon (%" PRId64 "); reason: next elegibility time (%" PRId64 ") closer than epsilon; N'-E=%" PRId64,
+                        TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS),
+                        nextElegibilityTime,
+                        TICK_REL_TIME(nextElegibilityTime, TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS)));
+                ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
             }
             else
             {
                 // if elegibility time is closer than current alarm time
-                if (TICK_LE(nextElegibilityTime, ats_counter_alarm_time))
+                if (TICK_LE(nextElegibilityTime, alarm_time.tick))
                 {
                     // => new elegibility time is closer than current alarm time but far enough to be able to update the alarm time => update alarm to elegibility time
-                    LOG_DBG("timer update: update to next elegibility (%'" PRId64 "); reason: next elegibility time closer than counter (%'" PRId64 ") but not too close; C-E=%'" PRId64, nextElegibilityTime, ats_counter_alarm_time, TICK_REL_TIME(nextElegibilityTime, ats_counter_alarm_time));
-                    ats_counter_alarm_time = nextElegibilityTime;
+                    LOG_DBG("timer update: update to next elegibility (%" PRId64 "); reason: next elegibility time closer than counter (%" PRId64 ") but not too close; C-E=%" PRId64,
+                            nextElegibilityTime,
+                            alarm_time.tick,
+                            TICK_REL_TIME(nextElegibilityTime, alarm_time.tick));
+                    ats_time_set_alarm(nextElegibilityTime);
                 }
                 else
                 {
                     // => new elegibility time is farther than next alarm time => no action required
-                    LOG_DBG("timer update: no action; reason: timer not expired, next elegibility time (%'" PRId64 ") greater than counter (%'" PRId64 "); E-C=%'" PRId64, nextElegibilityTime, ats_counter_alarm_time, TICK_REL_TIME(ats_counter_alarm_time, nextElegibilityTime));
+                    LOG_DBG("timer update: no action; reason: timer not expired, next elegibility time (%" PRId64 ") greater than counter (%" PRId64 "); E-C=%" PRId64,
+                            nextElegibilityTime,
+                            alarm_time.tick,
+                            TICK_REL_TIME(alarm_time.tick, nextElegibilityTime));
                     return 0;
                 }
             }
@@ -336,28 +319,17 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
         else
         {
             // no action (except maybe if E < N; TODO)
-            LOG_DBG("timer update: no action; reason: timer not expired but expiring within <epsilon from now; N'-C=%'" PRId64 "", TICK_REL_TIME(ats_counter_alarm_time, counterVal + CONFIG_ATS_TIMER_EPSILON_TICKS));
+            LOG_DBG("timer update: no action; reason: timer not expired but expiring within <epsilon from now; N'-C=%" PRId64 "",
+                    TICK_REL_TIME(alarm_time.tick, *outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS));
             return 0;
         }
     }
-    struct counter_alarm_cfg alarm = {
-        .callback = ats_counter_alarm_cb,
-        .flags = COUNTER_ALARM_CFG_ABSOLUTE,
-        .ticks = ats_counter_alarm_time};
-
-    counter_cancel_channel_alarm(ats_counter_dev, 0);
-    return counter_set_channel_alarm(ats_counter_dev, 0, &alarm);
 }
 
-void ats_counter_top_cb(const struct device *dev, void *user_data)
+void ats_counter_alarm_cb(uint64_t ticks)
 {
-    ats_counter_time_msb++;
-}
-
-void ats_counter_alarm_cb(const struct device *dev, uint8_t chan_id, uint32_t ticks, void *user_data)
-{
-    LOG_DBG("counter alarm at %" PRId32, ticks);
-    uint64_t nextElegibilityTime = TIME_INVALID;
+    LOG_DBG("counter alarm at %" PRId64, ticks);
+    ats_time_t nextElegibilityTime = {.valid = false};
     do
     {
         STRUCT_SECTION_FOREACH(ats, ats_data)
@@ -366,35 +338,29 @@ void ats_counter_alarm_cb(const struct device *dev, uint8_t chan_id, uint32_t ti
             {
                 if (ats_process_queue(&(ats_data->group[i]), ticks) > 0)
                 {
-                    if (nextElegibilityTime == TIME_INVALID)
+                    if (nextElegibilityTime.valid)
                     {
-                        nextElegibilityTime = ats_data->group[i].queueHeadElegibilityTime;
+                        nextElegibilityTime.tick = TICK_MIN(nextElegibilityTime.tick, TICK_NORMALIZE(ats_data->group[i].queueHeadElegibilityTime.tick));
                     }
                     else
                     {
-                        nextElegibilityTime = TICK_MIN(nextElegibilityTime, ats_data->group[i].queueHeadElegibilityTime);
+                        nextElegibilityTime.tick = TICK_NORMALIZE(ats_data->group[i].queueHeadElegibilityTime.tick);
+                        nextElegibilityTime.valid = true;
                     }
                 }
             }
         }
-    } while (nextElegibilityTime != TIME_INVALID && ats_update_counter_alarm(nextElegibilityTime, true, &ticks) == RETURN_PROCESS_NOW);
-    if (nextElegibilityTime == TIME_INVALID)
+    } while (nextElegibilityTime.valid && ats_update_counter_alarm(nextElegibilityTime.tick, true, &ticks) == RETURN_PROCESS_NOW);
+    if (!nextElegibilityTime.valid)
     {
-        ats_counter_alarm_time = TIME_INVALID;
-        counter_cancel_channel_alarm(ats_counter_dev, 0);
+        ats_time_cancel_alarm();
     }
 }
 
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
-    uint32_t counterVal = 0;
-    uint64_t counteMsb = ats_counter_time_msb; // todo: not thread safe
-    int res = counter_get_value(ats_counter_dev, &counterVal);
-    if (res)
-    {
-        LOG_ERR("Error reading current time: %d", res);
-        return -1;
-    }
+    uint64_t now;
+    ats_time_get(&now);
     size_t pktSize = net_pkt_get_len(pkt); // todo: packet size doesn't include mac header?
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
@@ -405,17 +371,16 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     uint8_t groupId = ats_data->scheduler[schedId].schedulerGroup;
     struct k_msgq *queue = &(ats_data->group[groupId].queue);
 
-    uint64_t now64 = (counteMsb << 32) | counterVal;
-    uint64_t elegibilityTime = ats_calc_elegibility_time(ats_data, schedId, pktSize, now64);
-    if (elegibilityTime == TIME_INVALID)
+    ats_time_t elegibilityTime = ats_calc_elegibility_time(ats_data, schedId, pktSize, now);
+    if (!elegibilityTime.valid)
     {
-        LOG_WRN("group %d packet elegibility time (%" PRId64 ") more than %" PRId64 " ticks after now (%" PRId64 ") => longer than absolut maximum residence. Dropping packet from scheduler %d", groupId, elegibilityTime, TICK_MODULO, now64, schedId);
+        LOG_WRN("group %d packet elegibility time (%" PRId64 ") more than %" PRId64 " ticks after now (%" PRId64 ") => longer than absolut maximum residence. Dropping packet from scheduler %d", groupId, elegibilityTime.tick, TICK_MAX_INTERVAL, now, schedId);
         return -1; // todo: proper error codes
     }
     struct ats_enqued_packet packet =
         {
             .packet = pkt,
-            .elegibilityTime = elegibilityTime % TICK_MODULO,
+            .elegibilityTime = TICK_NORMALIZE(elegibilityTime.tick),
         };
 
     if (k_msgq_put(queue, &packet, K_NO_WAIT) != 0)
@@ -435,19 +400,20 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 
     LOG_DBG("group %d, enqueued paket, new len: %d, next elegibility time %" PRId64 ", empty before", groupId, (int)(oldLen + 1), packet.elegibilityTime);
 
-    ats_data->group[groupId].queueHeadElegibilityTime = packet.elegibilityTime;
+    ats_data->group[groupId].queueHeadElegibilityTime.tick = packet.elegibilityTime;
+    ats_data->group[groupId].queueHeadElegibilityTime.valid = true;
 
     // packet isn't elegible yet and queue was empty => check if timer need updating
     k_sched_lock();
-    int updateRes = ats_update_counter_alarm(packet.elegibilityTime, false, &counterVal);
+    int updateRes = ats_update_counter_alarm(packet.elegibilityTime, false, &now);
     k_sched_unlock();
     if (updateRes == RETURN_PROCESS_NOW)
     {
-        uint8_t numRemaining = ats_process_queue(&(ats_data->group[groupId]), counterVal);
+        uint8_t numRemaining = ats_process_queue(&(ats_data->group[groupId]), now);
         if (numRemaining > 0)
         {
             k_sched_lock();
-            updateRes = ats_update_counter_alarm(ats_data->group[groupId].queueHeadElegibilityTime, false, &counterVal);
+            updateRes = ats_update_counter_alarm(ats_data->group[groupId].queueHeadElegibilityTime.tick, false, &now);
             k_sched_unlock();
         }
     }

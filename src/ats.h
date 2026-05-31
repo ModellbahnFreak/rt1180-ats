@@ -4,6 +4,7 @@
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
+#include "ats_time.h"
 
 struct ats_scheduler
 {
@@ -26,7 +27,7 @@ struct ats_group
     char queueBuffer[CONFIG_ATS_QUEUE_LENGTH * sizeof(struct ats_enqued_packet)]; // (byte) buffer for packet queue
     atomic_t queueLen;
     int64_t groupElegibilityTimeTicks;
-    int64_t queueHeadElegibilityTime;
+    ats_time_t queueHeadElegibilityTime;
     struct k_mutex elegibilityTimeMutex;
     struct ats *parent;
 };
