@@ -443,8 +443,13 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     k_sched_unlock();
     if (updateRes == RETURN_PROCESS_NOW)
     {
-        ats_process_queue(&(ats_data->group[groupId]), counterVal);
-        // no need to update counter again, because IF another packet has arrived while the current one was processed, that will have started the timer, otherwise the queue is empty
+        uint8_t numRemaining = ats_process_queue(&(ats_data->group[groupId]), counterVal);
+        if (numRemaining > 0)
+        {
+            k_sched_lock();
+            updateRes = ats_update_counter_alarm(ats_data->group[groupId].queueHeadElegibilityTime, false, &counterVal);
+            k_sched_unlock();
+        }
     }
     // LOG_DBG("group %p, timer set for %" PRId64 " ns, no timer running before", groupId, timeUntilElegible);
     return 0;

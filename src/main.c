@@ -43,22 +43,10 @@ int port_idx = 3;
 
 static struct k_sem quit_lock;
 
-struct packet_data
-{
-	int send_sock;
-};
-
-static struct packet_data sock_packet;
 static bool finish;
 static K_SEM_DEFINE(iface_up, 0, 1);
 const struct device *if_dev_a = DEVICE_DT_GET(LAN_NODE);
 struct net_if *iface;
-
-static void send_packet(void);
-
-K_THREAD_DEFINE(send_help_thread_id, STACK_SIZE,
-				send_packet, NULL, NULL, NULL,
-				THREAD_PRIORITY, 0, -1);
 
 // K_THREAD_STACK_DEFINE(sender_thread_stack, STACK_SIZE);
 
@@ -67,36 +55,6 @@ const char lorem_ipsum_a[] = "Interface A" LOREM_IPSUM;
 static void quit(void)
 {
 	k_sem_give(&quit_lock);
-}
-
-static int start_socket(int *sock, int if_idx)
-{
-	struct sockaddr_ll dst = {0};
-	int ret;
-
-	*sock = socket(AF_PACKET,
-				   IS_ENABLED(CONFIG_NET_SAMPLE_ENABLE_PACKET_DGRAM) ? SOCK_DGRAM : SOCK_RAW,
-				   htons(ETH_P_ALL));
-	if (*sock < 0)
-	{
-		LOG_ERR("Failed to create %s socket : %d",
-				IS_ENABLED(CONFIG_NET_SAMPLE_ENABLE_PACKET_DGRAM) ? "DGRAM" : "RAW",
-				errno);
-		return -errno;
-	}
-
-	dst.sll_ifindex = if_idx;
-	dst.sll_family = AF_PACKET;
-
-	ret = bind(*sock, (const struct sockaddr *)&dst,
-			   sizeof(struct sockaddr_ll));
-	if (ret < 0)
-	{
-		LOG_ERR("Failed to bind packet socket : %d", errno);
-		return -errno;
-	}
-
-	return 0;
 }
 
 static void find_actual_iface()
@@ -124,44 +82,6 @@ static void find_actual_iface()
 		return;
 	}
 #endif
-}
-
-static void send_packet(void)
-{
-	int ret;
-	int if_a = net_if_get_by_iface(iface);
-
-	ret = start_socket(&sock_packet.send_sock, if_a);
-	if (ret < 0)
-	{
-		quit();
-		return;
-	}
-
-	while (ret == 0)
-	{
-		/* If we have received any data, flush it here in order to
-		 * not to leak memory in IP stack.
-		 */
-		do
-		{
-
-			static char recv_buffer[RECV_BUFFER_SIZE];
-
-			ret = recv(sock_packet.send_sock, recv_buffer,
-					   sizeof(recv_buffer), MSG_DONTWAIT);
-		} while (ret > 0);
-
-		if (ret != 0)
-		{
-			LOG_WRN("Error receiving %d", ret);
-			ret = 0;
-		}
-
-		LOG_DBG("Done receiving. Sleeping");
-		k_sleep(K_MSEC(1000));
-	}
-	LOG_DBG("Helper thread exiting");
 }
 
 static void iface_up_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *changed_iface) //(uint64_t mgmt_event, struct net_if *changed_iface, void *info, size_t info_length, void *user_data)
@@ -237,10 +157,8 @@ int main(void)
 		sender_speedtest, iface, NULL, NULL,
 		THREAD_PRIORITY, 0, K_NO_WAIT);*/
 
-	 start_sender(iface, 1486, 1000000, 2000000, true);
+	start_sender(iface, 100, 1000000, 2000000, true);
 	//  start_sender(iface, 100, 1000000, 2000000, false);
-
-	// k_thread_start(send_help_thread_id);
 
 	k_sem_take(&quit_lock, K_FOREVER);
 
@@ -248,11 +166,5 @@ int main(void)
 
 	finish = true;
 
-	k_thread_join(send_help_thread_id, K_FOREVER);
-
-	if (sock_packet.send_sock >= 0)
-	{
-		(void)close(sock_packet.send_sock);
-	}
 	return 0;
 }
