@@ -29,7 +29,7 @@ struct ats *ats_init(struct net_if *iface)
     LOG_INF("Initializing ATS struct for iface %s", net_if_get_config(iface)->name);
     LOG_DBG("allocating %d schedulers, %d groups and %d queue slots/group", CONFIG_ATS_SCHEDULER_INSTANCES, CONFIG_ATS_GROUP_INSTANCES, CONFIG_ATS_QUEUE_LENGTH);
     // todo: remove
-    LOG_INF("Counter frequency %" PRId32 " Hz; max interval: %" PRIu64 " ticks = %" PRIu64 " ns", TICKS_PER_SECOND, TICK_MAX_INTERVAL, TIME_MODULO / 2);
+    LOG_INF("Counter frequency %" PRId32 " Hz; max interval: %" PRIu64 " ticks", TICKS_PER_SECOND, TICK_MAX_INTERVAL);
 
     struct ats *newInst = ats_get_by_net_if(iface);
     if (newInst != NULL)
