@@ -13,6 +13,10 @@
 #elif DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_netc_ptp_clock)
 #define TICKS_PER_SECOND TIME_NS
 
+#elif !DT_NODE_EXISTS(ATS_COUNTER)
+#warning "Using zephy integrated timer. This is not recommended due to accuracy. Specify a hardware timer"
+#define TICKS_PER_SECOND CONFIG_SYS_CLOCK_TICKS_PER_SEC
+
 #else
 #error "Unknown counter/timer type for ATS. Requiring NXPs gpt or ptp timer"
 

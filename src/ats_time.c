@@ -3,7 +3,9 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(ats_time, CONFIG_ATS_LOG_LEVEL);
 
+#if DT_NODE_EXISTS(ATS_COUNTER)
 const static struct device *ats_time_dev = DEVICE_DT_GET(ATS_COUNTER);
+#endif
 static ats_time_t ats_time_alarm_time = {.valid = false};
 static ats_time_alarm_callback_t ats_time_callback = NULL;
 
@@ -80,11 +82,12 @@ int ats_time_set_alarm(uint64_t time)
 int ats_time_cancel_alarm()
 {
     counter_cancel_channel_alarm(ats_time_dev, 0);
+    ats_time_alarm_time.valid = true;
 }
 
 #elif DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_netc_ptp_clock)
 
-#error "ats_time implementation using ptp clock not done; interrupts not working"
+//#error "ats_time implementation using ptp clock not done; interrupts not working"
 
 #include "ptp_clock.h"
 
@@ -105,11 +108,11 @@ int ats_time_init(ats_time_alarm_callback_t callback)
         ats_time_callback = callback;
     }
 
-    struct netc_ptp_clock_alarm_config cfg = {
+    /*struct netc_ptp_clock_alarm_config cfg = {
         .alarmIndex = 1,
         .callback = ats_time_ptp_alarm_cb};
 
-    ptp_clock_config_alarm(ats_time_dev, &cfg);
+    ptp_clock_config_alarm(ats_time_dev, &cfg);*/
     return 0;
 }
 
@@ -130,6 +133,50 @@ int ats_time_set_alarm(uint64_t time)
 int ats_time_cancel_alarm()
 {
     ptp_clock_stop_alarm(ats_time_dev, 1);
+    ats_time_alarm_time.valid = true;
+}
+
+#elif !DT_NODE_EXISTS(ATS_COUNTER)
+
+static void ats_time_timer_cb(struct k_timer *timer)
+{
+    ats_time_alarm_time.valid = false;
+    if (ats_time_callback != NULL)
+    {
+        ats_time_callback((uint64_t)k_uptime_ticks());
+    }
+}
+
+K_TIMER_DEFINE(ats_time_timer, ats_time_timer_cb, NULL);
+
+int ats_time_init(ats_time_alarm_callback_t callback)
+{
+    if (ats_time_callback != NULL)
+    {
+        ats_time_callback = callback;
+    }
+    return 0;
+}
+
+void ats_time_get(uint64_t *now)
+{
+    *now = (uint64_t)k_uptime_ticks();
+}
+
+int ats_time_set_alarm(uint64_t time)
+{
+    time = TICK_NORMALIZE(time);
+    ats_time_alarm_time.valid = true;
+    ats_time_alarm_time.tick = time;
+
+    k_timer_start(&ats_time_timer, K_TICKS(time - (uint64_t)k_uptime_ticks()), K_FOREVER);
+    return 0;
+}
+
+int ats_time_cancel_alarm()
+{
+    k_timer_stop(&ats_time_timer);
+    ats_time_alarm_time.valid = true;
 }
 
 #endif
