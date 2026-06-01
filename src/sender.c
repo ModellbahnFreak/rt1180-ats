@@ -3,122 +3,15 @@
 #include <zephyr/logging/log.h>
 #include "ats.h"
 #include "sender.h"
-#include "fsl_netc_endpoint.h"
 #include <zephyr/net/dsa_core.h>
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
-extern struct netc_eth_data
-{
-    DEVICE_MMIO_NAMED_RAM(port);
-    DEVICE_MMIO_NAMED_RAM(pfconfig);
-    ep_handle_t handle;
-    struct net_if *iface;
-    uint8_t mac_addr[6];
-    /* TX */
-    uint8_t *tx_buff;
-    volatile bool tx_done;
-    atomic_t tx_packetCount;
-    /* RX */
-    struct k_sem rx_sem;
-    struct k_thread rx_thread;
+AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t aligned_sender_buf[1], 64);
+NET_BUF_SIMPLE_DEFINE_STATIC(sender_buf, 1400);
 
-    K_KERNEL_STACK_MEMBER(rx_thread_stack, CONFIG_ETH_NXP_IMX_RX_THREAD_STACK_SIZE);
-    uint8_t *rx_frame;
-#ifdef CONFIG_ETH_NXP_IMX_NETC_MSI_GIC
-    unsigned int tx_intid;
-    unsigned int rx_intid;
-#endif
-};
-
-extern struct netc_eth_config
-{
-    DEVICE_MMIO_NAMED_ROM(port);
-    DEVICE_MMIO_NAMED_ROM(pfconfig);
-    uint16_t si_idx;
-    const struct device *phy_dev;
-    netc_hw_mii_mode_t phy_mode;
-    volatile bool pseudo_mac;
-    void (*generate_mac)(uint8_t *mac_addr);
-    void (*bdr_init)(netc_bdr_config_t *bdr_config, netc_rx_bdr_config_t *rx_bdr_config,
-                     netc_tx_bdr_config_t *tx_bdr_config);
-    const struct pinctrl_dev_config *pincfg;
-#ifdef CONFIG_ETH_NXP_IMX_NETC_MSI_GIC
-    const struct device *msi_dev;
-    uint8_t msi_device_id; /* MSI device ID */
-#else
-    uint8_t tx_intr_msg_data;
-    uint8_t rx_intr_msg_data;
-#endif
-#ifdef NETC_PTP_TIMESTAMPING_SUPPORT
-    const struct device *ptp_clock;
-#endif
-};
-
-AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t aligned_sender_buf[1500], 64);
-NET_BUF_SIMPLE_DEFINE_STATIC(sender_buf, 1);
-
-void sender_speedtest(void *if_param, void *p2, void *p3)
-{
-    ARG_UNUSED(p2);
-    ARG_UNUSED(p3);
-    struct net_if *iface = (struct net_if *)if_param;
-    LOG_INF("speedtest started");
-
-    uint8_t *buf = aligned_sender_buf;
-    for (size_t i = 0; i < 1500; i++)
-    {
-        buf[i] = 0xff;
-    }
-    *((uint16_t *)(buf + 12)) = 0x4208;
-    *((uint32_t *)(buf + 14)) = 0;
-
-    const struct device *dev = net_if_get_device(iface);
-    struct netc_eth_data *data = dev->data;
-#ifdef CONFIG_NET_DSA
-    const struct netc_eth_config *cfg = dev->config;
-    int dst_port = -1;
-    if (cfg->pseudo_mac)
-    {
-        struct dsa_switch_context *dsa_switch_ctx = dev->data;
-        const struct device *conduitDev = net_if_get_device(dsa_switch_ctx->iface_conduit);
-        data = conduitDev->data;
-        const struct dsa_port_config *port_cfg = dev->config;
-        dst_port = port_cfg->port_idx;
-    }
-#endif
-    netc_buffer_struct_t buff = {.buffer = buf, .length = 1500};
-    netc_frame_struct_t frame = {.buffArray = &buff, .length = 1};
-    ep_tx_opt opt = {0};
-    int errSum = 0;
-
-    while (true)
-    {
-        netc_tx_bd_t txDesc[2] = {0};
-        NETC_ClearTxDescriptor(&txDesc[0]);
-        NETC_ClearTxDescriptor(&txDesc[1]);
-#ifdef CONFIG_NET_DSA
-        if (dst_port != -1)
-        {
-            txDesc[0].standard.flags = NETC_SI_TXDESCRIP_RD_FLQ(2) |
-                                       NETC_SI_TXDESCRIP_RD_SMSO_MASK |
-                                       NETC_SI_TXDESCRIP_RD_PORT(dst_port);
-        }
-#endif
-        status_t result = EP_SendFrameCommon(&data->handle, &data->handle.txBdRing[0], 0, &frame,
-                                             NULL, &txDesc[0], data->handle.cfg.txCacheMaintain);
-
-        // status_t result = EP_SendFrame(&data->handle, 0, &frame, NULL, &opt);
-        if (result)
-        {
-            errSum += result;
-            *((uint32_t *)(buf + 22)) = errSum;
-            // LOG_ERR("Send error: %d", result);
-        }
-        *((uint32_t *)(buf + 18)) = result;
-        *((uint32_t *)(buf + 14)) += 1;
-    }
-}
+struct net_buf_pool *tx_bufs;
+struct net_buf_pool *rx_bufs;
 
 void sender(void *sender_parameters, void *p2, void *p3)
 {
@@ -130,7 +23,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
     k_tid_t appId = k_current_get();
     struct ats *ats_data = ats_get_by_net_if(params->iface);
-    uint32_t maxTokenRate = params->maxPacket * 1000000 / params->minIntervalUs;
+    uint32_t maxTokenRate = params->maxPacket * 1000000 / params->maxIntervalUs;
     if (!params->regular)
     {
         maxTokenRate = params->maxPacket * 1000000 / ((params->minIntervalUs + params->maxIntervalUs) / 2);
@@ -155,6 +48,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
         struct net_buf *buf = &buf_inst;
         net_buf_reset(buf);
         net_pkt_append_buffer(pkt, buf);
+        net_pkt_alloc_buffer(pkt, 100 - 14, 0, K_NO_WAIT); // makes pkt non contiguous
         net_buf_reserve(buf, 14);
 
         net_pkt_set_ll_proto_type(pkt, 0x0842);
@@ -162,27 +56,55 @@ void sender(void *sender_parameters, void *p2, void *p3)
         *((uint32_t *)(net_buf_data_sender_buf + 14)) = 0;
 #else
         int i = 0;
+        net_pkt_get_info(NULL, NULL, &rx_bufs, &tx_bufs);
 #endif
 
         while (true)
         {
+            int64_t preSend[8] = {k_uptime_ticks(), 0, 0, 0, 0, 0, 0, 0};
 #ifdef useStaticBuf
             buf->data = buf->__buf + 14; // reserve space for ethernet headers, reference get_reserve_ll_header_size; can't use net_buf_reserve as it requires the buffer to be empty but we want to overwrite
-            buf->len = params->maxPacket;
+            buf->len = buf->size - 14;
             net_pkt_ref(pkt);
 #else
+            LOG_DBG("Space in rx pool: %d, space in tx pool: %d", rx_bufs->uninit_count, tx_bufs->uninit_count);
             // ######Regular packet allocation
             struct net_pkt *pkt = net_pkt_alloc_with_buffer(params->iface, params->maxPacket, NET_AF_UNSPEC, 0, K_FOREVER);
+            // todo: find out, why packet allocation takes so long
+            preSend[1] = k_uptime_ticks();
             net_pkt_set_ll_proto_type(pkt, 0x0842);
+            preSend[2] = k_uptime_ticks();
             net_pkt_write_le32(pkt, i++);
+            preSend[3] = k_uptime_ticks();
             net_pkt_memset(pkt, 5, params->maxPacket);
+            preSend[4] = k_uptime_ticks();
+            net_pkt_set_priority(pkt, i % 8);
 #endif
 
-            LOG_INF("App %d trying to send %d bytes, then waiting %d us", (int)appId, net_pkt_get_len(pkt), params->maxIntervalUs);
+            LOG_INF("App %d trying to send %d bytes, then waiting %d us", (int)appId, net_pkt_get_len(pkt), params->minIntervalUs);
+            preSend[5] = k_uptime_ticks();
             ats_send(ats_data, schedId, pkt);
+            preSend[6] = k_uptime_ticks();
             k_sleep(K_USEC(params->minIntervalUs));
+            preSend[7] = k_uptime_ticks();
             // net_send_data(pkt);
+
+            int64_t waitTime = (preSend[7] - preSend[0]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
+            if (waitTime > 1200000)
+            {
+                LOG_ERR("Wait of sender was longer than 1.2s (%" PRId64 "us)", waitTime);
+            }
+            LOG_INF("Send timings: total: %" PRId64 " us; allocate: %" PRId64 " us, setType: %" PRId64 " us, write id: %" PRId64 " us; memset: %" PRId64 " us; prio: %" PRId64 " us; ats: %" PRId64 " us; sleep: %" PRId64 " us", waitTime,
+                    (preSend[1] - preSend[0]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[2] - preSend[1]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[3] - preSend[2]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[4] - preSend[3]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[5] - preSend[4]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[6] - preSend[5]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC,
+                    (preSend[7] - preSend[6]) * 1000000LL / CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+#ifdef useStaticBuf
             *((uint32_t *)(net_buf_data_sender_buf + 14)) += 1;
+#endif
         }
     }
     else

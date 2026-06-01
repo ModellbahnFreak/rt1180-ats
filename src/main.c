@@ -22,6 +22,7 @@ LOG_MODULE_REGISTER(net_pkt_sock_sample, LOG_LEVEL_DBG);
 
 #include "ats.h"
 #include "sender.h"
+#include "speedtest.h"
 
 #define CONFIG_NET_SAMPLE_SEND_WAIT_TIME 1000
 #define CONFIG_NET_SAMPLE_ENABLE_PACKET_DGRAM
@@ -143,7 +144,7 @@ int main(void)
 	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
 	find_actual_iface();
 	// todo? auto init for iface
-	ats_init(iface);
+	// ats_init(iface);
 
 	k_sem_init(&quit_lock, 0, K_SEM_MAX_LIMIT);
 
@@ -151,14 +152,10 @@ int main(void)
 
 	LOG_INF("Packet socket sample is running");
 
-	/*int i = sender_threads_count++;
-	k_tid_t speedtest_thread_id = k_thread_create(
-		&sender_thread_data[i], &sender_thread_stack[i][0], STACK_SIZE,
-		sender_speedtest, iface, NULL, NULL,
-		THREAD_PRIORITY, 0, K_NO_WAIT);*/
+	// start_sender(iface, 100, 1000000, 2000000, true);
+	//   start_sender(iface, 100, 1000000, 2000000, false);
 
-	start_sender(iface, 100, 1000000, 2000000, true);
-	//  start_sender(iface, 100, 1000000, 2000000, false);
+	speedtest_start(iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1);
 
 	k_sem_take(&quit_lock, K_FOREVER);
 

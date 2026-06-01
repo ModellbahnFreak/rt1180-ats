@@ -11,7 +11,6 @@ struct sender_params {
     struct net_if* iface;
 };
 
-void sender_speedtest(void *if_param, void *p2, void *p3);
 void sender(void *sender_parameters, void *p2, void *p3);
 
 #endif
