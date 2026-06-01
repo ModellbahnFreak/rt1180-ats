@@ -13,9 +13,11 @@ struct ptp_clock_nxp_netc_data
 
 static netc_ptp_clock_alarm_cb_t netc_ptp_clock_curr_cb = NULL;
 
-#define PTP_CLOCK_NXP_NETC_INIT_EXTENSION(n)                                                                  \
-	{                                                                                                         \
-		/*	.dev = DEVICE_DT_INST_GET(n),*/ /*.irqNum = DT_INST_IRQN(n), */ /*.priority = 0,               */ \
+#define PTP_CLOCK_NXP_NETC_INIT_EXTENSION(n) \
+	{                                        \
+		.dev = DEVICE_DT_INST_GET(n),        \
+		.irqNum = DT_INST_IRQN(n),           \
+		.priority = 0,                       \
 	},
 
 static struct irqLookup
@@ -25,7 +27,7 @@ static struct irqLookup
 	unsigned int priority;
 };
 struct irqLookup irqTable[] = {
-	DT_INST_FOREACH_STATUS_OKAY(PTP_CLOCK_NXP_NETC_INIT_EXTENSION)};
+	/*DT_INST_FOREACH_STATUS_OKAY(PTP_CLOCK_NXP_NETC_INIT_EXTENSION)*/};
 
 void netc_ptp_clock_isr(const void *param)
 {

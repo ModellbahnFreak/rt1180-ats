@@ -10,16 +10,20 @@ LOG_MODULE_REGISTER(speedtest, CONFIG_ATS_LOG_LEVEL);
 
 #define STACK_SIZE 1024
 #define NUM_STEPS 3
+#define PACKET_SIZE 1500
+#define MAX_TIMESTAMPS ((CONFIG_ATS_SPEEDTEST_BUF_SIZE / 8 / CONFIG_ATS_SPEEDTEST_MAX_INSTANCES / NUM_STEPS) * CONFIG_ATS_SPEEDTEST_MAX_INSTANCES * NUM_STEPS)
 
 uint64_t speedtest_start_timestamp = 0;
-uint64_t speedtest_send_timestamps[(CONFIG_ATS_SPEEDTEST_MAX_TIMESTAMPS / CONFIG_ATS_SPEEDTEST_MAX_INSTANCES / 4) * CONFIG_ATS_SPEEDTEST_MAX_INSTANCES * 4];
+uint64_t speedtest_send_timestamps[MAX_TIMESTAMPS];
 
 static void speedtest_store_time(uint8_t threadI, uint32_t packetI, uint8_t step, uint64_t mask)
 {
-    size_t i = (threadI + ((size_t)step * CONFIG_ATS_SPEEDTEST_MAX_INSTANCES) + ((size_t)packetI * (CONFIG_ATS_SPEEDTEST_MAX_INSTANCES + NUM_STEPS))) % CONFIG_ATS_SPEEDTEST_MAX_TIMESTAMPS;
+    size_t i = (threadI + ((size_t)step * CONFIG_ATS_SPEEDTEST_MAX_INSTANCES) + ((size_t)packetI * CONFIG_ATS_SPEEDTEST_MAX_INSTANCES * NUM_STEPS)) % MAX_TIMESTAMPS;
     ats_time_get(speedtest_send_timestamps + i);
-    speedtest_send_timestamps[i] = (speedtest_send_timestamps[i] - speedtest_start_timestamp) | mask;
+    speedtest_send_timestamps[i] = (speedtest_send_timestamps[i]) | mask;
 }
+
+K_HEAP_DEFINE(speedtest_buf_heap, PACKET_SIZE *CONFIG_ATS_SPEEDTEST_MAX_INSTANCES + 512);
 
 extern struct netc_eth_data
 {
@@ -75,9 +79,10 @@ void speedtest_hal(void *if_param, void *thread_num, void *p3)
     uint8_t threadNum = (uint8_t)(size_t)thread_num;
     LOG_INF("speedtest_hal started");
 
-    uint8_t buf[1500];
+    uint8_t *buf = k_heap_alloc(&speedtest_buf_heap, PACKET_SIZE, K_NO_WAIT);
+    __ASSERT(buf != NULL, "could not aquire buffer memory for speedtest instance %d", threadNum);
     uint32_t *i = (uint32_t *)(buf + 14);
-    for (size_t i = 0; i < 1500; i++)
+    for (size_t i = 0; i < PACKET_SIZE; i++)
     {
         buf[i] = 0xff;
     }
@@ -98,7 +103,7 @@ void speedtest_hal(void *if_param, void *thread_num, void *p3)
         dst_port = port_cfg->port_idx;
     }
 #endif
-    netc_buffer_struct_t buff = {.buffer = buf, .length = 1500};
+    netc_buffer_struct_t buff = {.buffer = buf, .length = PACKET_SIZE};
     netc_frame_struct_t frame = {.buffArray = &buff, .length = 1};
     ep_tx_opt opt = {0};
     int errSum = 0;
@@ -122,15 +127,19 @@ void speedtest_hal(void *if_param, void *thread_num, void *p3)
         status_t result = EP_SendFrameCommon(&data->handle, &data->handle.txBdRing[0], 0, &frame,
                                              NULL, &txDesc[0], data->handle.cfg.txCacheMaintain);
 
-        if (result)
+        if (result == 0)
         {
+            while (data->handle.hw.si->BDR[0].TBCIR != data->handle.txBdRing[0].producerIndex)
+            {
+            }
+            EP_ReclaimTxDescCommon(&data->handle, &data->handle.txBdRing[0], 0, true);
             speedtest_store_time(threadNum, *i, 2, SPEEDTEST_BITMASK_SEND_SUCCESS);
-            errSum += result;
-            *((uint32_t *)(buf + 22)) = errSum;
         }
         else
         {
             speedtest_store_time(threadNum, *i, 2, SPEEDTEST_BITMASK_SEND_FAIL);
+            errSum += result;
+            *((uint32_t *)(buf + 22)) = errSum;
         }
         *((uint32_t *)(buf + 18)) = result;
         *i += 1;
@@ -143,19 +152,20 @@ void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
     uint8_t threadNum = (uint8_t)(size_t)thread_num;
     LOG_INF("speedtest_zephyr started");
 
-    uint8_t bufData[1500];
+    uint8_t *bufData = k_heap_alloc(&speedtest_buf_heap, PACKET_SIZE, K_NO_WAIT);
+    __ASSERT(bufData != NULL, "could not aquire buffer memory for speedtest instance %d", threadNum);
     uint32_t *i = (uint32_t *)(bufData + 14);
 
     struct net_pkt *pkt = net_pkt_alloc_on_iface((struct net_if *)if_param, K_FOREVER);
     struct net_buf buf_inst = {
         .ref = 1U,
         .flags = 0U,
-        .size = 1500,
+        .size = PACKET_SIZE,
         .user_data_size = 0,
         .b = {
             .__buf = bufData,
             .data = bufData,
-            .size = 1500,
+            .size = PACKET_SIZE,
             .len = 0,
         },
     };
@@ -165,7 +175,7 @@ void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
     net_buf_reserve(buf, 14);
 
     net_pkt_set_ll_proto_type(pkt, 0x0842);
-    net_pkt_memset(pkt, 5, 1500 - 14);
+    net_pkt_memset(pkt, 5, PACKET_SIZE - 14);
     *i = 0;
 
     int errSum = 0;
