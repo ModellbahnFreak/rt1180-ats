@@ -13,11 +13,9 @@ struct ptp_clock_nxp_netc_data
 
 static netc_ptp_clock_alarm_cb_t netc_ptp_clock_curr_cb = NULL;
 
-#define PTP_CLOCK_NXP_NETC_INIT_EXTENSION(n) \
-	{                                        \
-		.dev = DEVICE_DT_INST_GET(n),        \
-		.irqNum = DT_INST_IRQN(n),           \
-		.priority = 0,                       \
+#define PTP_CLOCK_NXP_NETC_INIT_EXTENSION(n)                                                                  \
+	{                                                                                                         \
+		/*	.dev = DEVICE_DT_INST_GET(n),*/ /*.irqNum = DT_INST_IRQN(n), */ /*.priority = 0,               */ \
 	},
 
 static struct irqLookup
@@ -78,7 +76,7 @@ void ptp_clock_config_alarm(const struct device *dev, struct netc_ptp_clock_alar
 	irq_connect_dynamic(irqNum,
 						priority,
 						netc_ptp_clock_isr, dev, 0);
-	irq_enable(DT_INST_IRQN(n));
+	irq_enable(irqNum);
 
 	struct ptp_clock_nxp_netc_data *data = dev->data;
 	__ASSERT(config != NULL, "No configuration for ptp timer alarm provided");

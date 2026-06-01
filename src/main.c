@@ -144,7 +144,7 @@ int main(void)
 	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
 	find_actual_iface();
 	// todo? auto init for iface
-	// ats_init(iface);
+	ats_init(iface);
 
 	k_sem_init(&quit_lock, 0, K_SEM_MAX_LIMIT);
 
@@ -152,10 +152,10 @@ int main(void)
 
 	LOG_INF("Packet socket sample is running");
 
-	// start_sender(iface, 100, 1000000, 2000000, true);
+	start_sender(iface, 100, 1000000, 2000000, true);
 	//   start_sender(iface, 100, 1000000, 2000000, false);
 
-	speedtest_start(iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1);
+	//speedtest_start(iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1, false);
 
 	k_sem_take(&quit_lock, K_FOREVER);
 

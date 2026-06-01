@@ -3,7 +3,6 @@
 #include <zephyr/logging/log.h>
 #include "ats.h"
 #include "sender.h"
-#include <zephyr/net/dsa_core.h>
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
