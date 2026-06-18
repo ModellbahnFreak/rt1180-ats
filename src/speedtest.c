@@ -218,6 +218,8 @@ void speedtest_hal(void *if_param, void *thread_num, void *p3)
     }
 }
 
+extern int netc_eth_tx(const struct device *dev, struct net_pkt *pkt);
+
 void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
 {
     ARG_UNUSED(p3);
@@ -227,6 +229,11 @@ void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
     uint8_t *bufData = k_heap_alloc(&speedtest_buf_heap, PACKET_SIZE, K_NO_WAIT);
     __ASSERT(bufData != NULL, "could not aquire buffer memory for speedtest instance %d", threadNum);
     uint32_t *i = (uint32_t *)(bufData + 14);
+
+    const struct device *dev = net_if_get_device((struct net_if *)if_param);
+    struct dsa_switch_context *dsa_switch_ctx = dev->data;
+    struct net_if *iface_conduit = dsa_switch_ctx->iface_conduit;
+    const struct device *dev_conduit = net_if_get_device(iface_conduit);
 
     struct net_pkt *pkt = net_pkt_alloc_on_iface((struct net_if *)if_param, K_FOREVER);
     struct net_buf buf_inst = {
@@ -244,10 +251,11 @@ void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
     struct net_buf *buf = &buf_inst;
     net_buf_reset(buf);
     net_pkt_append_buffer(pkt, buf);
-    net_buf_reserve(buf, 14);
+    // net_buf_reserve(buf, 14);
 
     net_pkt_set_ll_proto_type(pkt, 0x0842);
-    net_pkt_memset(pkt, threadNum, PACKET_SIZE - 14);
+    net_pkt_memset(pkt, threadNum, PACKET_SIZE);
+    net_pkt_cursor_init(pkt);
     *i = 0;
 
     int errSum = 0;
@@ -255,25 +263,28 @@ void speedtest_zephyr(void *if_param, void *thread_num, void *p3)
     while (true)
     {
         speedtest_store_time(threadNum, *i, 0, 0);
-        buf->data = buf->__buf + 14; // reserve space for ethernet headers, reference get_reserve_ll_header_size; can't use net_buf_reserve as it requires the buffer to be empty but we want to overwrite
-        buf->len = buf->size - 14;
-        net_pkt_ref(pkt);
+        /*buf->data = buf->__buf + 14; // reserve space for ethernet headers, reference get_reserve_ll_header_size; can't use net_buf_reserve as it requires the buffer to be empty but we want to overwrite
+        buf->len = buf->size - 14;*/
+        // net_pkt_ref(pkt);
 
         speedtest_store_time(threadNum, *i, 1, 0);
-        int result = net_send_data(pkt);
+        k_mutex_lock(&speedtest_hal_mutex, K_FOREVER);
+        int result = netc_eth_tx(dev_conduit, pkt);
+        k_mutex_unlock(&speedtest_hal_mutex);
 
-        if (result)
+        if (result == 0)
         {
             speedtest_store_time(threadNum, *i, 2, SPEEDTEST_BITMASK_SEND_SUCCESS);
-            errSum += result;
-            *((uint32_t *)(bufData + 22)) = errSum;
         }
         else
         {
             speedtest_store_time(threadNum, *i, 2, SPEEDTEST_BITMASK_SEND_FAIL);
+            errSum += result;
+            *((uint32_t *)(bufData + 22)) = errSum;
         }
         *((uint32_t *)(bufData + 18)) = result;
         *i += 1;
+        k_yield();
     }
 }
 
@@ -291,12 +302,37 @@ k_tid_t speedtest_start(struct net_if *iface, uint8_t prio, bool useZephyrStack)
         ats_time_get(&speedtest_start_timestamp);
     }
 
+    /*LOG_DBG("Starting lock test");
+    uint64_t now;
+    uint64_t t1;
+    uint64_t t2;
+    do
+    {
+        ats_time_get(&now);
+    } while ((now & 0xffffffff) < 0x0fffffff);
+    int key = irq_lock();
+    t1 = now;
+    do
+    {
+        ats_time_get(&now);
+    } while ((now & 0xffffffff) > t1);
+    t2 = now;
+    irq_unlock(key);
+    ats_time_get(&now);
+    LOG_DBG("Timestamps: 0x%09" PRIx64 ",  0x%09" PRIx64 ", 0x%09" PRIx64, t1, t2, now);
+    return NULL;*/
+
     __ASSERT(newThreadNum < CONFIG_ATS_SPEEDTEST_MAX_INSTANCES, "Couldn't greate speedtest instance %d as only space for %d instances configured", newThreadNum, CONFIG_ATS_SPEEDTEST_MAX_INSTANCES);
 
     k_tid_t speedtest_thread_id = k_thread_create(
         &speedtest_thread_data[newThreadNum], &speedtest_thread_stack[newThreadNum][0], STACK_SIZE,
         useZephyrStack ? speedtest_zephyr : speedtest_hal, iface, (void *)(size_t)newThreadNum, NULL,
-        prio, 0, K_NO_WAIT);
+        prio, 0, K_FOREVER);
+
+    char tName[12] = "speedtest_";
+    tName[10] = (newThreadNum & 0x0f) + '0';
+    k_thread_name_set(speedtest_thread_id, tName);
+    k_thread_start(speedtest_thread_id);
 
     return speedtest_thread_id;
 }
