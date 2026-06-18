@@ -12,6 +12,10 @@
 
 #elif DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_netc_ptp_clock)
 #define TICKS_PER_SECOND TIME_NS
+#define ATS_TIME_GPT DT_NODELABEL(gpt1)
+#if !DT_NODE_HAS_COMPAT(ATS_TIME_GPT, nxp_imx_gpt)
+#error "Current implementation of ptp timer requires a GPT as support timer. Didn't find gpt1"
+#endif
 
 #elif !DT_NODE_EXISTS(ATS_COUNTER)
 #warning "Using zephy integrated timer. This is not recommended due to accuracy. Specify a hardware timer"

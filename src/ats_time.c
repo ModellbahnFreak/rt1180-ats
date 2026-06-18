@@ -86,13 +86,21 @@ int ats_time_cancel_alarm()
 }
 
 #elif DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_netc_ptp_clock)
-
-//#error "ats_time implementation using ptp clock not done; interrupts not working"
-
 #include "ptp_clock.h"
+#include <zephyr/drivers/counter.h>
 
-static void ats_time_ptp_alarm_cb(const struct device *dev)
+const static struct device *ats_time_gpt_dev = DEVICE_DT_GET(ATS_TIME_GPT);
+
+// static void ats_time_ptp_alarm_cb(const struct device *dev)
+static void ats_time_counter_alarm_cb(const struct device *dev, uint8_t chan_id, uint32_t ticks, void *user_data)
 {
+    ats_time_alarm_time.valid = false;
+    if (ats_time_callback != NULL)
+    {
+        uint64_t now;
+        ats_time_get(&now);
+        ats_time_callback(now);
+    }
 }
 
 int ats_time_init(ats_time_alarm_callback_t callback)
@@ -102,18 +110,18 @@ int ats_time_init(ats_time_alarm_callback_t callback)
         LOG_ERR("ptp clock device not ready");
         return -1;
     }
+    if (!device_is_ready(ats_time_gpt_dev))
+    {
+        LOG_ERR("gpt device not ready");
+        return -1;
+    }
 
     if (ats_time_callback != NULL)
     {
         ats_time_callback = callback;
     }
 
-    /*struct netc_ptp_clock_alarm_config cfg = {
-        .alarmIndex = 1,
-        .callback = ats_time_ptp_alarm_cb};
-
-    ptp_clock_config_alarm(ats_time_dev, &cfg);*/
-    return 0;
+    return counter_start(ats_time_gpt_dev);
 }
 
 void ats_time_get(uint64_t *now)
@@ -123,16 +131,23 @@ void ats_time_get(uint64_t *now)
 
 int ats_time_set_alarm(uint64_t time)
 {
-    time = TICK_NORMALIZE(time);
+    uint64_t now;
+    ats_time_get(&now);
+    time = (time - now) * 24 / 100;
+    struct counter_alarm_cfg alarm = {
+        .callback = ats_time_counter_alarm_cb,
+        .flags = 0,
+        .ticks = time};
+
+    counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
     ats_time_alarm_time.valid = true;
     ats_time_alarm_time.tick = time;
-    ptp_clock_start_alarm(ats_time_dev, 1, TICK_NORMALIZE(time));
-    return 0;
+    return counter_set_channel_alarm(ats_time_gpt_dev, 0, &alarm);
 }
 
 int ats_time_cancel_alarm()
 {
-    ptp_clock_stop_alarm(ats_time_dev, 1);
+    counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
     ats_time_alarm_time.valid = true;
 }
 
