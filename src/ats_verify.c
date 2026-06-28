@@ -1,7 +1,7 @@
 #include "ats_verify.h"
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/drivers/counter.h>
+#include "ats_time.h"
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
@@ -9,71 +9,41 @@ LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 #define NUM_STREAMS CONFIG_ATS_SCHEDULER_INSTANCES
 #define TIME_NS 1000000000LL
 
-struct ats_verify_sent_event
-{
-    void *streamId;
-    uint64_t timestamp;
-    uint64_t elegibilityTime;
-    uint16_t packetSize;
-};
-
-struct ats_verify_stream_t
-{
-    void *streamId;
-    int32_t bucket;
-    uint64_t lastUpdate;
-    uint32_t tokensPerSecond;
-    uint32_t burstSize;
-};
-
-struct ats_verify_t
-{
-    struct k_spinlock lock;
-    struct device *timer;
-    struct ats_verify_sent_event events[128];
-    uint8_t producerIdx;
-    uint8_t consumerIdx;
-    struct ats_verify_stream_t streams[NUM_STREAMS];
-    uint64_t lastElegibilityTime;
-};
-
-struct ats_verify_t ats_verify = {.timer = DEVICE_DT_GET(DT_ALIAS(time))};
 static bool finish = false;
 
-void ats_verify_packet_sent(void *streamId, uint16_t packetSize, uint64_t elegibilityTime)
+void ats_verify_packet_sent(struct ats_verify_t *verifier, void *streamId, uint16_t packetSize, uint64_t elegibilityTime)
 {
     uint8_t i;
-    K_SPINLOCK(&ats_verify.lock)
+    unsigned int key = irq_lock();
+    if (((verifier->producerIdx + 1) & 0x7f) == verifier->consumerIdx)
     {
-        if (((ats_verify.producerIdx + 1) & 0x7f) == ats_verify.consumerIdx)
-        {
-            LOG_ERR("verify queue full, dropping event");
-            return;
-        }
-        i = ats_verify.producerIdx;
-        ats_verify.producerIdx = (ats_verify.producerIdx + 1) & 0x7f;
+        LOG_ERR("verify queue full, dropping event");
+        return;
     }
-    struct ats_verify_sent_event *write = &ats_verify.events[i];
+    i = verifier->producerIdx;
+    verifier->producerIdx = (verifier->producerIdx + 1) & 0x7f;
+    irq_unlock(key);
+    struct ats_verify_sent_event *write = &verifier->events[i];
     write->streamId = streamId;
     write->packetSize = packetSize;
     write->elegibilityTime = elegibilityTime;
-    counter_get_value_64(ats_verify.timer, &(write->timestamp));
+    ats_time_get(&(write->timestamp));
 }
 
-void ats_verify_set_stream_parameters(void *streamId, uint32_t tokensPerSecond, uint32_t burstSize)
+void ats_verify_set_stream_parameters(struct ats_verify_t *verifier, void *streamId, uint32_t tokensPerSecond, uint32_t burstSize)
 {
     struct ats_verify_stream_t *stream = NULL;
     bool isNew = false;
     for (size_t i = 0; i < NUM_STREAMS; i++)
     {
-        if (ats_verify.streams[i].streamId == streamId)
+        if (verifier->streams[i].streamId == streamId)
         {
-            stream = &ats_verify.streams[i];
+            stream = &verifier->streams[i];
             break;
         }
-        else if (ats_verify.streams[i].streamId == NULL)
+        else if (verifier->streams[i].streamId == NULL)
         {
-            stream = &ats_verify.streams[i];
+            stream = &verifier->streams[i];
             isNew = true;
             break;
         }
@@ -84,11 +54,12 @@ void ats_verify_set_stream_parameters(void *streamId, uint32_t tokensPerSecond, 
     stream->burstSize = burstSize;
 }
 
-void ats_verify_thread_entry(void *param1, void *param2, void *param3)
+void ats_verify_thread_entry(void *verifierPtr, void *param2, void *param3)
 {
-    ARG_UNUSED(param1);
     ARG_UNUSED(param2);
     ARG_UNUSED(param3);
+
+    struct ats_verify_t *verifier = verifierPtr;
 
     LOG_DBG("ATS-verify started");
 
@@ -97,29 +68,29 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
         while (true /*read all events, canceled with break*/)
         {
             uint8_t i;
-            K_SPINLOCK(&ats_verify.lock)
+            unsigned int key = irq_lock();
+            if (verifier->consumerIdx == verifier->producerIdx)
             {
-                if (ats_verify.consumerIdx == ats_verify.producerIdx)
-                {
-                    break;
-                    K_SPINLOCK_BREAK;
-                }
-                i = ats_verify.consumerIdx;
-                ats_verify.consumerIdx = (ats_verify.consumerIdx + 1) & 0x7f;
+                break;
+                K_SPINLOCK_BREAK;
             }
-            struct ats_verify_sent_event *evt = &ats_verify.events[i];
+            i = verifier->consumerIdx;
+            verifier->consumerIdx = (verifier->consumerIdx + 1) & 0x7f;
+            irq_unlock(key);
+
+            struct ats_verify_sent_event *evt = &verifier->events[i];
             struct ats_verify_stream_t *stream = NULL;
             bool isNew = false;
             for (size_t i = 0; i < NUM_STREAMS; i++)
             {
-                if (ats_verify.streams[i].streamId == evt->streamId)
+                if (verifier->streams[i].streamId == evt->streamId)
                 {
-                    stream = &ats_verify.streams[i];
+                    stream = &verifier->streams[i];
                     break;
                 }
-                else if (ats_verify.streams[i].streamId == NULL)
+                else if (verifier->streams[i].streamId == NULL)
                 {
-                    stream = &ats_verify.streams[i];
+                    stream = &verifier->streams[i];
                     isNew = true;
                     break;
                 }
@@ -127,9 +98,9 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
             __ASSERT(stream != NULL, "no free stream in verifier found");
 
             // assumes only one send interface / pcp class!
-            if (evt->elegibilityTime < ats_verify.lastElegibilityTime)
+            if (evt->elegibilityTime < verifier->lastElegibilityTime)
             {
-                LOG_WRN("A packet with smaller elegibility time %d was sent after another packet with %d", evt->elegibilityTime, ats_verify.lastElegibilityTime);
+                LOG_WRN("A packet with smaller elegibility time %d was sent after another packet with %d", evt->elegibilityTime, verifier->lastElegibilityTime);
             }
 
             uint64_t jitter = evt->timestamp - evt->elegibilityTime;
@@ -146,8 +117,8 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
                 LOG_INF("stream %p sent %d bytes; elegible at %d, sent at %d, jitter %d", evt->streamId, evt->packetSize, evt->elegibilityTime, evt->timestamp, jitter);
             }
 
-                        stream->lastUpdate = evt->timestamp;
-            ats_verify.lastElegibilityTime = evt->elegibilityTime;
+            stream->lastUpdate = evt->timestamp;
+            verifier->lastElegibilityTime = evt->elegibilityTime;
 
             k_yield();
         }
@@ -155,6 +126,17 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
     }
 }
 
-/*K_THREAD_DEFINE(sats_verify_thread_id, 1024,
-                ats_verify_thread_entry, NULL, NULL, NULL,
-                CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, 0);*/
+static K_THREAD_STACK_ARRAY_DEFINE(processing_thread_stack, CONFIG_ATS_NUM_INTERFACES, 1024);
+static struct k_thread processing_thread_data[CONFIG_ATS_NUM_INTERFACES];
+static atomic_t processing_thread_count;
+
+void ats_verify_start_processing(struct ats_verify_t *verifier)
+{
+    atomic_val_t i = atomic_inc(&processing_thread_count);
+
+    __ASSERT(i < CONFIG_ATS_NUM_INTERFACES, "No free ats verifier thread stack. Tried to start verifier %d when maximum count is %d", i, CONFIG_ATS_NUM_INTERFACES);
+    k_tid_t processing_thread_id = k_thread_create(
+        &processing_thread_data[i], &processing_thread_stack[i][0], 1024,
+        ats_verify_thread_entry, verifier, NULL, NULL,
+        CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, K_NO_WAIT);
+}

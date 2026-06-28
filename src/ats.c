@@ -2,9 +2,6 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
 #include "ats.h"
-#ifdef CONFIG_ATS_VERIFY_ENABLED
-#include "ats_verify.h"
-#endif
 
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
 #define LOG_IF_ERR(err, ...)  \
@@ -55,6 +52,10 @@ struct ats *ats_init(struct net_if *iface)
     newInst->iface = iface;
 
     __ASSERT(newInst != NULL, "no free ats instance found in ats_init");
+
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+    ats_verify_start_processing(&(newInst->verifier));
+#endif
 
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
@@ -120,7 +121,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     }
 
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_set_stream_parameters(&(ats_data->group[groupId]), tokensPerSecond, burstSize);
+    ats_verify_set_stream_parameters(&(ats_data->verifier), &(ats_data->group[groupId]), tokensPerSecond, burstSize);
 #endif
 
     ats_data->scheduler[schedulerId].bucketEmptyTimeTicks = 0;
@@ -143,7 +144,7 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
+    ats_verify_packet_sent(&(group->parent->verifier), group, net_pkt_get_len(pkt), elegibilityTime);
 #endif
     return net_send_data(pkt);
 }

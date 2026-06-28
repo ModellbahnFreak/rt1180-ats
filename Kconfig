@@ -1,11 +1,19 @@
 mainmenu "Asynchronous Traffic Shaping IEEE 802.1Qcr"
 
+config ATS_NUM_INTERFACES
+	int "Number of interfaces/traffic classes with ATS support"
+	default 2
+	range 1 255
+	help
+	  The maximum number of interface + traffic/pcp class cominations for which ATS support can be enabled.
+	  The ATS on the same interface but different traffic class is treated like an independant interface!
+
 config ATS_SCHEDULER_INSTANCES
-	int "Number of ATS instances (maximum number of apps)"
+	int "Number of ATS instances (maximum number of apps/streams)"
     default 5
 	range 1 255
 	help
-	  The maximum number of ATS instances to allocate space for.
+	  The maximum number of ATS instances to allocate space for per iface/traffic class.
 	  Defines the maximum number of apps thet can be used
 
 config ATS_GROUP_INSTANCES
@@ -13,7 +21,7 @@ config ATS_GROUP_INSTANCES
     default 5
 	range 1 255
 	help
-	  The maximum number of ATS groups to allocate space for.
+	  The maximum number of ATS groups to allocate space for per iface/traffic class.
 	  Every scheduler used must be assigned to a group (multiple can be assigned to same group)
 
 config ATS_QUEUE_LENGTH

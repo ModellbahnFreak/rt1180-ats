@@ -5,6 +5,9 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
 #include "ats_time.h"
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+#include "ats_verify.h"
+#endif
 
 struct ats_scheduler
 {
@@ -37,6 +40,9 @@ struct ats
     struct ats_scheduler scheduler[CONFIG_ATS_SCHEDULER_INSTANCES];
     struct ats_group group[CONFIG_ATS_GROUP_INSTANCES];
     struct net_if *iface;
+    #ifdef CONFIG_ATS_VERIFY_ENABLED
+    struct ats_verify_t verifier;
+    #endif
 };
 
 /**
