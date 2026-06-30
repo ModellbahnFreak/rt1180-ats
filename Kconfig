@@ -2,9 +2,10 @@ mainmenu "Asynchronous Traffic Shaping IEEE 802.1Qcr"
 
 config ATS_NUM_INTERFACES
 	int "Number of interfaces/traffic classes with ATS support"
-	default 2
-	range 1 255
+	default 0
+	range 0 255
 	help
+	  Default: 0 = as many as are defined in the device tree. 
 	  The maximum number of interface + traffic/pcp class cominations for which ATS support can be enabled.
 	  The ATS on the same interface but different traffic class is treated like an independant interface!
 
@@ -52,12 +53,28 @@ config ATS_TIMER_EPSILON_NS
 	  Required to avoid race condition when setting timer.
 	  MUST be bigger than the time required for thread-lock, isr-lock, timer alarm update and both unlocks
 
+config ATS_IFACE_INIT_PRIO
+	int "Init priority for ats ifeces (between ETH_INIT_PRIORITY and NET_INIT_PRIO)"
+	depends on NET_INIT_PRIO > ETH_INIT_PRIORITY
+	default 61
+	range ETH_INIT_PRIORITY NET_INIT_PRIO
+	help
+	  The initialization priority for ats interfaces. MUST be BIGGER than ETH_INIT_PRIORITY and SMALLER than NET_INIT_PRIO.
+	  If set incorrectly, the initialization of the ats interface will fail (as ethernet and interface init are called in wrong order or parent devices aren't ready yet)
+
 config ATS_VERIFY_ENABLED
 	bool "Enable ats correctness verification"
 	default n
 	help
 	  Enable this to check and log correctness of ATS packet sending.
 	  This will start another (low prio) thread that does the verification by tracking the bucket states separately
+
+config ATS_VERIFY_NO_PROCESSING
+	bool "Disable processing threads of ats verify, only collect timestamps"
+	default n
+	help
+	  To prevent the processing threads of ats verify to be spawned, set this to y, then only the timestamps will be collected.
+	  Can be dumped using debugger
 
 config ATS_VERIFY_LOG_LEVEL
 	int "Log level for ATS verification"

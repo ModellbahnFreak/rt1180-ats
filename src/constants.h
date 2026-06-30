@@ -1,0 +1,24 @@
+#ifndef RT1180_ATS_CONSTANTS_H__
+#define RT1180_ATS_CONSTANTS_H__
+
+#include <zephyr/devicetree.h>
+
+#if CONFIG_ATS_NUM_INTERFACES == 0
+
+#if DT_NUM_INST_STATUS_OKAY(nxp_imx_ats) == 1
+#define CONFIG_ATS_STRUCT_ITERABLE_SIZE DT_CHILD_NUM(DT_INST(0, nxp_imx_ats))
+#else
+#define CONFIG_ATS_STRUCT_ITERABLE_SIZE 0
+#endif
+
+#elif
+
+#if DT_CHILD_NUM(DT_INST(0, nxp_imx_ats)) > CONFIG_ATS_NUM_INTERFACES
+#define CONFIG_ATS_STRUCT_ITERABLE_SIZE DT_CHILD_NUM(DT_INST(0, nxp_imx_ats))
+#else
+#define CONFIG_ATS_STRUCT_ITERABLE_SIZE CONFIG_ATS_NUM_INTERFACES
+#endif
+
+#endif
+
+#endif

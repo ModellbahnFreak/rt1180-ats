@@ -2,6 +2,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
 #include "ats.h"
+#include "constants.h"
 
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
 #define LOG_IF_ERR(err, ...)  \
@@ -15,9 +16,7 @@
 LOG_MODULE_REGISTER(ats, CONFIG_ATS_LOG_LEVEL);
 
 // Actual instances of ats struct in iterable struct section
-STRUCT_SECTION_ITERABLE(ats, ats_instance_0);
-
-void ats_timer_expiry(struct k_timer *timer);
+STRUCT_SECTION_ITERABLE_ARRAY(ats, ats_instances, CONFIG_ATS_STRUCT_ITERABLE_SIZE);
 
 void ats_counter_alarm_cb();
 
@@ -49,10 +48,10 @@ struct ats *ats_init(struct net_if *iface)
             break;
         }
     }
-    newInst->iface = iface;
-
     __ASSERT(newInst != NULL, "no free ats instance found in ats_init");
 
+    newInst->iface = iface;
+    
 #ifdef CONFIG_ATS_VERIFY_ENABLED
     ats_verify_start_processing(&(newInst->verifier));
 #endif

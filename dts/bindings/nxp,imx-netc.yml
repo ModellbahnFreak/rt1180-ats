@@ -1,0 +1,35 @@
+description: NXP i.MX NETC ATS software driver
+
+compatible: "nxp,imx-ats"
+
+include: 
+    - name: base.yaml
+      property-allowlist:
+        - compatible
+
+
+child-binding:
+  description: One instance of the ats implementation (one per iface/priority combination)
+  include: 
+    - name: base.yaml
+      property-blocklist:
+        - compatible
+
+  properties:
+    parent:
+      type: phandle
+      description: Hardware interface to actually send via
+      required: true
+    priority:
+      type: int
+      description: The (pcp) priority for which to initialize ATS schedulers. All priorities on an interface behave like independant interfaces.
+      default: 0
+      enum:
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7

@@ -9,8 +9,10 @@
 		eth3 = &switch_port3;
 		eth4 = &enetc_psi0;
 		ethpseudo = &enetc_psi1;
-		//time = &netc_ptp_clock0;
-		time = &gpt1;
+		time = &netc_ptp_clock0;
+		//time = &gpt1;
+
+		ats = &ats_0;
 	};
 
 	soc {
@@ -18,6 +20,24 @@
 			netc: ethernet {
 				enetc_psi0: ethernet@60b00000 {
 					status = "okay";
+				};
+
+				ats {
+					compatible = "nxp,imx-ats";
+
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					ats_0: ats@0 {
+						status = "okay";
+						parent = <&switch_port3>;
+						reg = <0>;
+					};
+					ats_1: ats@1 {
+						status = "okay";
+						parent = <&enetc_psi0>;
+						reg = <1>;
+					};
 				};
 			};
 		};
@@ -29,13 +49,16 @@
 	switch_port@0 {
 		status = "okay";
 	};
-	switch_port@0 {
+	switch_port@1 {
 		status = "okay";
 	};
-	switch_port@0 {
+	switch_port@2 {
 		status = "okay";
 	};
-	switch_port@0 {
+	switch_port@3 {
+		status = "okay";
+	};
+	switch_port@4 {
 		status = "okay";
 	};
 };

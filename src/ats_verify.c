@@ -3,11 +3,11 @@
 #include <zephyr/sys/atomic.h>
 #include "ats_time.h"
 #include <zephyr/logging/log.h>
+#include "constants.h"
 
 LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 
 #define NUM_STREAMS CONFIG_ATS_SCHEDULER_INSTANCES
-#define TIME_NS 1000000000LL
 
 static bool finish = false;
 
@@ -126,17 +126,19 @@ void ats_verify_thread_entry(void *verifierPtr, void *param2, void *param3)
     }
 }
 
-static K_THREAD_STACK_ARRAY_DEFINE(processing_thread_stack, CONFIG_ATS_NUM_INTERFACES, 1024);
-static struct k_thread processing_thread_data[CONFIG_ATS_NUM_INTERFACES];
+static K_THREAD_STACK_ARRAY_DEFINE(processing_thread_stack, CONFIG_ATS_STRUCT_ITERABLE_SIZE, 1024);
+static struct k_thread processing_thread_data[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
 static atomic_t processing_thread_count;
 
 void ats_verify_start_processing(struct ats_verify_t *verifier)
 {
+#ifndef CONFIG_ATS_VERIFY_NO_PROCESSING
     atomic_val_t i = atomic_inc(&processing_thread_count);
 
-    __ASSERT(i < CONFIG_ATS_NUM_INTERFACES, "No free ats verifier thread stack. Tried to start verifier %d when maximum count is %d", i, CONFIG_ATS_NUM_INTERFACES);
+    __ASSERT(i < CONFIG_ATS_STRUCT_ITERABLE_SIZE, "No free ats verifier thread stack. Tried to start verifier %d when maximum count is %d", i, CONFIG_ATS_STRUCT_ITERABLE_SIZE);
     k_tid_t processing_thread_id = k_thread_create(
         &processing_thread_data[i], &processing_thread_stack[i][0], 1024,
         ats_verify_thread_entry, verifier, NULL, NULL,
         CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, K_NO_WAIT);
+#endif
 }
