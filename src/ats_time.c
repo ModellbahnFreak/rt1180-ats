@@ -42,6 +42,8 @@ int ats_time_init(ats_time_alarm_callback_t callback)
         ats_time_callback = callback;
     }
 
+    LOG_DBG("Using gpt as time source with frequency %" PRId32 " Hz as", TICKS_PER_SECOND);
+
     struct counter_top_cfg topCfg = {
         .ticks = counter_get_top_value(ats_time_dev),
         .callback = ats_time_counter_top_cb};
@@ -116,6 +118,8 @@ int ats_time_init(ats_time_alarm_callback_t callback)
         return -1;
     }
 
+    LOG_DBG("Using ptp as time source and gpt as interrupt timer");
+
     if (ats_time_callback != NULL)
     {
         ats_time_callback = callback;
@@ -166,6 +170,8 @@ K_TIMER_DEFINE(ats_time_timer, ats_time_timer_cb, NULL);
 
 int ats_time_init(ats_time_alarm_callback_t callback)
 {
+    LOG_WRN("Using zephyr uptime as time source (NOT GRANULAR ENOUGH!) with frequency %" PRId32 " Hz as", TICKS_PER_SECOND);
+
     if (ats_time_callback != NULL)
     {
         ats_time_callback = callback;
