@@ -1,8 +1,13 @@
 #include <zephyr/kernel.h>
+#include <zephyr/net/ethernet.h>
+#include <zephyr/net/dsa_core.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
 #include "ats.h"
 #include "constants.h"
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+#include "ats_verify.h"
+#endif
 
 #define ATS_QUEUE_ARR_LENGTH (CONFIG_ATS_QUEUE_LENGTH + 1)
 #define LOG_IF_ERR(err, ...)  \
@@ -24,8 +29,6 @@ struct ats *ats_init(struct net_if *iface)
 {
     LOG_INF("Initializing ATS struct for iface %s", net_if_get_config(iface)->name);
     LOG_DBG("allocating %d schedulers, %d groups and %d queue slots/group", CONFIG_ATS_SCHEDULER_INSTANCES, CONFIG_ATS_GROUP_INSTANCES, CONFIG_ATS_QUEUE_LENGTH);
-    // todo: remove
-    LOG_INF("Counter frequency %" PRId32 " Hz; max interval: %" PRIu64 " ticks", TICKS_PER_SECOND, TICK_MAX_INTERVAL);
 
     struct ats *newInst = ats_get_by_net_if(iface);
     if (newInst != NULL)
@@ -50,11 +53,27 @@ struct ats *ats_init(struct net_if *iface)
     }
     __ASSERT(newInst != NULL, "no free ats instance found in ats_init");
 
-    newInst->iface = iface;
-    
-#ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_start_processing(&(newInst->verifier));
+    __ASSERT(net_if_l2(iface) == &NET_L2_GET_NAME(ETHERNET), "ATS only works on ethernet interfaces. Given interface wasn't ethernet");
+
+#ifdef CONFIG_NET_DSA
+    struct ethernet_context *eth_ctx = net_if_l2_data(iface);
+    __ASSERT(eth_ctx->dsa_port != DSA_CONDUIT_PORT, "Given interface was a DSA conduit port. Cannot send via that, use a user/switch port");
+    if (eth_ctx->dsa_port == DSA_USER_PORT)
+    {
+        const struct device *dev = net_if_get_device(iface);
+        struct dsa_switch_context *dsa_switch_ctx = dev->data;
+        newInst->ifaceDevice = net_if_get_device(dsa_switch_ctx->iface_conduit);
+    }
+    else
+    {
+        __ASSERT(eth_ctx->dsa_port == NON_DSA_PORT, "Given interface is of unknown type %d. Not a dsa switch port nor a non-dsa port", eth_ctx->dsa_port);
+        newInst->ifaceDevice = net_if_get_device(iface);
+    }
+#else
+    newInst->ifaceDevice = net_if_get_device(iface);
 #endif
+
+    newInst->iface = iface;
 
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
@@ -120,7 +139,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     }
 
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_set_stream_parameters(&(ats_data->verifier), &(ats_data->group[groupId]), tokensPerSecond, burstSize);
+    ats_verify_set_stream_parameters(&(ats_data->group[groupId]), ats_data, tokensPerSecond, burstSize);
 #endif
 
     ats_data->scheduler[schedulerId].bucketEmptyTimeTicks = 0;
@@ -132,6 +151,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     return schedulerId;
 }
 
+extern int netc_eth_tx(const struct device *dev, struct net_pkt *pkt);
 int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #ifdef CONFIG_ATS_VERIFY_ENABLED
                    ,
@@ -139,13 +159,12 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #endif
 )
 {
-    // todo: assert correctness here
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_packet_sent(&(group->parent->verifier), group, net_pkt_get_len(pkt), elegibilityTime);
+    ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
 #endif
-    return net_send_data(pkt);
+    return netc_eth_tx(group->parent->ifaceDevice, pkt);
 }
 
 /**
@@ -267,7 +286,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
                     TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS),
                     nextElegibilityTime,
                     TICK_REL_TIME(nextElegibilityTime, TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS)));
-            ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
+            return ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
         }
         else
         {
@@ -275,7 +294,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
             LOG_DBG("timer update: update to next elegibility (%" PRId64 "); reason: timer expired and next elegibility not too close; E-N=%" PRId64,
                     nextElegibilityTime,
                     TICK_REL_TIME(*outUsedNow, nextElegibilityTime));
-            ats_time_set_alarm(nextElegibilityTime);
+            return ats_time_set_alarm(nextElegibilityTime);
         }
     }
     else
@@ -291,7 +310,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
                         TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS),
                         nextElegibilityTime,
                         TICK_REL_TIME(nextElegibilityTime, TICK_NORMALIZE(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS)));
-                ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
+                return ats_time_set_alarm(*outUsedNow + CONFIG_ATS_TIMER_EPSILON_TICKS);
             }
             else
             {
@@ -303,7 +322,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
                             nextElegibilityTime,
                             alarm_time.tick,
                             TICK_REL_TIME(nextElegibilityTime, alarm_time.tick));
-                    ats_time_set_alarm(nextElegibilityTime);
+                    return ats_time_set_alarm(nextElegibilityTime);
                 }
                 else
                 {
@@ -324,6 +343,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
             return 0;
         }
     }
+    return -1; // unreachable
 }
 
 void ats_counter_alarm_cb(uint64_t ticks)
@@ -361,8 +381,9 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
     uint64_t now;
     ats_time_get(&now);
-    size_t pktSize = net_pkt_get_len(pkt); // todo: packet size doesn't include mac header?
+    size_t pktSize = net_pkt_get_len(pkt);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
+    __ASSERT(net_pkt_lladdr_dst(pkt)->len > 0, "packet to be sent via ATS isn't ethernet processed yet! Use upper layers of network stack.");
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
     __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);
     __ASSERT(pktSize <= ats_data->scheduler[schedId].burstSize, "packet size %d exeeds burst size %d of ATS %d", pktSize, ats_data->scheduler[schedId].burstSize, schedId);

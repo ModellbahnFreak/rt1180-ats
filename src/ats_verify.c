@@ -9,57 +9,109 @@ LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 
 #define NUM_STREAMS CONFIG_ATS_SCHEDULER_INSTANCES
 
-static bool finish = false;
+struct ats_verify_sent_event
+{
+    void *streamId;
+    uint64_t timestamp;
+    uint64_t elegibilityTime;
+    uint16_t packetSize;
+};
 
-void ats_verify_packet_sent(struct ats_verify_t *verifier, void *streamId, uint16_t packetSize, uint64_t elegibilityTime)
+struct ats_verify_stream_t
+{
+    void *streamId;
+    struct ats_verify_iface_t *ats_iface;
+    int32_t bucket;
+    uint64_t lastUpdate;
+    uint32_t tokensPerSecond;
+    uint32_t burstSize;
+};
+
+struct ats_verify_iface_t
+{
+    void *ats_data;
+    uint64_t lastElegibilityTime;
+};
+
+struct ats_verify_t
+{
+    struct ats_verify_sent_event events[128];
+    uint8_t producerIdx;
+    uint8_t consumerIdx;
+    struct ats_verify_stream_t streams[CONFIG_ATS_SCHEDULER_INSTANCES];
+    struct ats_verify_iface_t ifaces[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
+};
+
+static bool finish = false;
+struct ats_verify_t ats_verify_instance;
+
+void ats_verify_packet_sent(void *streamId, uint16_t packetSize, uint64_t elegibilityTime)
 {
     uint8_t i;
     unsigned int key = irq_lock();
-    if (((verifier->producerIdx + 1) & 0x7f) == verifier->consumerIdx)
+#ifndef CONFIG_ATS_VERIFY_NO_PROCESSING
+    if (((ats_verify_instance.producerIdx + 1) & 0x7f) == ats_verify_instance.consumerIdx)
     {
+        irq_unlock(key);
         LOG_ERR("verify queue full, dropping event");
         return;
     }
-    i = verifier->producerIdx;
-    verifier->producerIdx = (verifier->producerIdx + 1) & 0x7f;
+#endif
+    i = ats_verify_instance.producerIdx;
+    ats_verify_instance.producerIdx = (ats_verify_instance.producerIdx + 1) & 0x7f;
     irq_unlock(key);
-    struct ats_verify_sent_event *write = &verifier->events[i];
+    struct ats_verify_sent_event *write = &ats_verify_instance.events[i];
     write->streamId = streamId;
     write->packetSize = packetSize;
     write->elegibilityTime = elegibilityTime;
     ats_time_get(&(write->timestamp));
 }
 
-void ats_verify_set_stream_parameters(struct ats_verify_t *verifier, void *streamId, uint32_t tokensPerSecond, uint32_t burstSize)
+void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t tokensPerSecond, uint32_t burstSize)
 {
     struct ats_verify_stream_t *stream = NULL;
     bool isNew = false;
     for (size_t i = 0; i < NUM_STREAMS; i++)
     {
-        if (verifier->streams[i].streamId == streamId)
+        if (ats_verify_instance.streams[i].streamId == streamId)
         {
-            stream = &verifier->streams[i];
+            stream = &ats_verify_instance.streams[i];
             break;
         }
-        else if (verifier->streams[i].streamId == NULL)
+        else if (ats_verify_instance.streams[i].streamId == NULL)
         {
-            stream = &verifier->streams[i];
+            stream = &ats_verify_instance.streams[i];
             isNew = true;
             break;
         }
     }
     __ASSERT(stream != NULL, "no free stream in verifier found to set params");
 
+    for (size_t i = 0; i < CONFIG_ATS_STRUCT_ITERABLE_SIZE; i++)
+    {
+        if (ats_verify_instance.ifaces[i].ats_data == ats_data)
+        {
+            stream->ats_iface = &(ats_verify_instance.ifaces[i]);
+            break;
+        }
+        else if (ats_verify_instance.ifaces[i].ats_data == NULL)
+        {
+            stream->ats_iface = &(ats_verify_instance.ifaces[i]);
+            break;
+        }
+    }
+    __ASSERT(stream->ats_iface != NULL, "no free iface in verifier found to set params");
+
+    stream->ats_iface->ats_data = ats_data;
     stream->tokensPerSecond = tokensPerSecond;
     stream->burstSize = burstSize;
 }
 
-void ats_verify_thread_entry(void *verifierPtr, void *param2, void *param3)
+void ats_verify_thread_entry(void *param1, void *param2, void *param3)
 {
+    ARG_UNUSED(param1);
     ARG_UNUSED(param2);
     ARG_UNUSED(param3);
-
-    struct ats_verify_t *verifier = verifierPtr;
 
     LOG_DBG("ATS-verify started");
 
@@ -69,56 +121,46 @@ void ats_verify_thread_entry(void *verifierPtr, void *param2, void *param3)
         {
             uint8_t i;
             unsigned int key = irq_lock();
-            if (verifier->consumerIdx == verifier->producerIdx)
+            if (ats_verify_instance.consumerIdx == ats_verify_instance.producerIdx)
             {
                 break;
-                K_SPINLOCK_BREAK;
+                irq_unlock(key);
             }
-            i = verifier->consumerIdx;
-            verifier->consumerIdx = (verifier->consumerIdx + 1) & 0x7f;
+            i = ats_verify_instance.consumerIdx;
+            ats_verify_instance.consumerIdx = (ats_verify_instance.consumerIdx + 1) & 0x7f;
             irq_unlock(key);
 
-            struct ats_verify_sent_event *evt = &verifier->events[i];
+            struct ats_verify_sent_event *evt = &ats_verify_instance.events[i];
             struct ats_verify_stream_t *stream = NULL;
-            bool isNew = false;
             for (size_t i = 0; i < NUM_STREAMS; i++)
             {
-                if (verifier->streams[i].streamId == evt->streamId)
+                if (ats_verify_instance.streams[i].streamId == evt->streamId)
                 {
-                    stream = &verifier->streams[i];
+                    stream = &ats_verify_instance.streams[i];
                     break;
                 }
-                else if (verifier->streams[i].streamId == NULL)
+                else if (ats_verify_instance.streams[i].streamId == NULL)
                 {
-                    stream = &verifier->streams[i];
-                    isNew = true;
                     break;
                 }
             }
-            __ASSERT(stream != NULL, "no free stream in verifier found");
+            __ASSERT(stream != NULL, "stream %p for saved timing data not found in verifier", evt->streamId);
 
             // assumes only one send interface / pcp class!
-            if (evt->elegibilityTime < verifier->lastElegibilityTime)
+            if (evt->elegibilityTime < stream->ats_iface->lastElegibilityTime)
             {
-                LOG_WRN("A packet with smaller elegibility time %d was sent after another packet with %d", evt->elegibilityTime, verifier->lastElegibilityTime);
+                LOG_WRN("A packet with smaller elegibility time %d was sent after another packet with %d", evt->elegibilityTime, stream->ats_iface->lastElegibilityTime);
             }
 
             uint64_t jitter = evt->timestamp - evt->elegibilityTime;
 
-            if (!isNew)
-            {
-                uint64_t timeSinceLast = evt->timestamp - stream->lastUpdate;
-                uint32_t rate = (uint64_t)(evt->packetSize) * TIME_NS / timeSinceLast;
+            uint64_t timeSinceLast = evt->timestamp - stream->lastUpdate;
+            uint32_t rate = (uint64_t)(evt->packetSize) * TIME_NS / timeSinceLast;
 
-                LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %d, sent at %d, jitter %d", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->timestamp, jitter);
-            }
-            else
-            {
-                LOG_INF("stream %p sent %d bytes; elegible at %d, sent at %d, jitter %d", evt->streamId, evt->packetSize, evt->elegibilityTime, evt->timestamp, jitter);
-            }
+            LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %d, sent at %d, jitter %d", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->timestamp, jitter);
 
             stream->lastUpdate = evt->timestamp;
-            verifier->lastElegibilityTime = evt->elegibilityTime;
+            stream->ats_iface->lastElegibilityTime = evt->elegibilityTime;
 
             k_yield();
         }
@@ -126,19 +168,8 @@ void ats_verify_thread_entry(void *verifierPtr, void *param2, void *param3)
     }
 }
 
-static K_THREAD_STACK_ARRAY_DEFINE(processing_thread_stack, CONFIG_ATS_STRUCT_ITERABLE_SIZE, 1024);
-static struct k_thread processing_thread_data[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
-static atomic_t processing_thread_count;
-
-void ats_verify_start_processing(struct ats_verify_t *verifier)
-{
 #ifndef CONFIG_ATS_VERIFY_NO_PROCESSING
-    atomic_val_t i = atomic_inc(&processing_thread_count);
-
-    __ASSERT(i < CONFIG_ATS_STRUCT_ITERABLE_SIZE, "No free ats verifier thread stack. Tried to start verifier %d when maximum count is %d", i, CONFIG_ATS_STRUCT_ITERABLE_SIZE);
-    k_tid_t processing_thread_id = k_thread_create(
-        &processing_thread_data[i], &processing_thread_stack[i][0], 1024,
-        ats_verify_thread_entry, verifier, NULL, NULL,
-        CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, K_NO_WAIT);
+K_THREAD_DEFINE(sats_verify_thread_id, 1024,
+                ats_verify_thread_entry, NULL, NULL, NULL,
+                CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, 0);
 #endif
-}
