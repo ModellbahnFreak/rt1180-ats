@@ -161,6 +161,7 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 {
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
+    net_pkt_cursor_init(pkt);
 #ifdef CONFIG_ATS_VERIFY_ENABLED
     ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
 #endif
@@ -222,13 +223,12 @@ int ats_process_queue(struct ats_group *group, uint64_t now)
     return oldLen != -1 ? oldLen - 1 : (group->queueHeadElegibilityTime.valid ? 1 : 0);
 }
 
-ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t pktSize, uint64_t arrivalTick)
+ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size_t pktSize, uint64_t arrivalTick, uint64_t *bucketEmptyTime)
 {
     struct ats_scheduler *sched = &(ats_data->scheduler[schedId]);
     struct ats_group *group = &(ats_data->group[sched->schedulerGroup]);
     uint64_t pktRecoveryTimeTicks = ((uint64_t)pktSize) * TICKS_PER_SECOND / sched->tokensPerSecond;
 
-    k_mutex_lock(&(group->elegibilityTimeMutex), K_FOREVER);
     uint64_t schedulerElegebilityTimeTicks = sched->bucketEmptyTimeTicks + pktRecoveryTimeTicks;
     ats_time_t elegebilityTime = {
         .valid = false,
@@ -236,7 +236,6 @@ ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size
     };
     if (TICK_ILLEGAL_INTERVAL(arrivalTick, elegebilityTime.tick))
     {
-        k_mutex_unlock(&(group->elegibilityTimeMutex));
         return elegebilityTime;
     }
     group->groupElegibilityTimeTicks = elegebilityTime.tick;
@@ -245,14 +244,13 @@ ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size
     if (elegebilityTime.tick < bucketFullTime)
     {
         // bucket wasn't full yet => remove pktSize tokens from bucket by moving bucketEmptyTime
-        sched->bucketEmptyTimeTicks = schedulerElegebilityTimeTicks;
+        *bucketEmptyTime = schedulerElegebilityTimeTicks;
     }
     else
     {
         // bucket was full => subtrack pktSize tokens from bucket and set, bucketEmptyTime accurdingly
-        sched->bucketEmptyTimeTicks = elegebilityTime.tick - sched->emptyToFullTimeTicks + pktRecoveryTimeTicks;
+        *bucketEmptyTime = elegebilityTime.tick - sched->emptyToFullTimeTicks + pktRecoveryTimeTicks;
     }
-    k_mutex_unlock(&(group->elegibilityTimeMutex));
 
     elegebilityTime.valid = true;
     return elegebilityTime;
@@ -270,6 +268,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
     nextElegibilityTime = TICK_NORMALIZE(nextElegibilityTime);
     ats_time_t alarm_time;
     ats_time_get_alarm(&alarm_time);
+    LOG_DBG("now: %" PRId64 ", elegible: %" PRId64 ", alarm valid: %d, alarm time: %" PRId64, *outUsedNow, nextElegibilityTime, alarm_time.valid, alarm_time.tick);
 
     if (TICK_LE(nextElegibilityTime, *outUsedNow))
     {
@@ -391,10 +390,13 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 
     uint8_t groupId = ats_data->scheduler[schedId].schedulerGroup;
     struct k_msgq *queue = &(ats_data->group[groupId].queue);
+    uint64_t newBucketEmptyTime;
 
-    ats_time_t elegibilityTime = ats_calc_elegibility_time(ats_data, schedId, pktSize, now);
+    k_mutex_lock(&(ats_data->group[groupId].elegibilityTimeMutex), K_FOREVER);
+    ats_time_t elegibilityTime = ats_calc_elegibility_time(ats_data, schedId, pktSize, now, &newBucketEmptyTime);
     if (!elegibilityTime.valid)
     {
+        k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
         LOG_WRN("group %d packet elegibility time (%" PRId64 ") more than %" PRId64 " ticks after now (%" PRId64 ") => longer than absolut maximum residence. Dropping packet from scheduler %d", groupId, elegibilityTime.tick, TICK_MAX_INTERVAL, now, schedId);
         return -1; // todo: proper error codes
     }
@@ -407,9 +409,13 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     if (k_msgq_put(queue, &packet, K_NO_WAIT) != 0)
     {
         // packet queue full, can't process packet (even if it were immediately elegible)
+        k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
         LOG_WRN("group %d packet queue is full (%d packets). Dropping packet from scheduler %d", groupId, CONFIG_ATS_QUEUE_LENGTH, schedId);
         return -1; // todo: proper error codes
     }
+    ats_data->scheduler[schedId].bucketEmptyTimeTicks = newBucketEmptyTime;
+    ats_data->group[groupId].groupElegibilityTimeTicks = elegibilityTime.tick;
+    k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
 
     atomic_val_t oldLen = atomic_inc(&(ats_data->group[groupId].queueLen));
     if (oldLen > 0)
