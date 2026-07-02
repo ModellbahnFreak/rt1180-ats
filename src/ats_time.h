@@ -55,14 +55,14 @@
 
 #else // TIME_REQUIRES_MODULO
 
-#define TICK_MAX_INTERVAL (1 << 63)
+#define TICK_MAX_INTERVAL ((uint64_t)(1LL << 63))
 
 #define TICK_NORMALIZE(a) ((uint64_t)(a))
 #define TICK_ILLEGAL_INTERVAL(a, b) false
-#define TICK_LE(a, b) (((b) - (a)) < TICK_MAX_INTERVAL ? true : false)
-#define TICK_GT(a, b) (((b) - (a)) > TICK_MAX_INTERVAL ? true : false)
-#define TICK_MAX(a, b) ((((b) - (a)) < TICK_MAX_INTERVAL) ? (b) : (a))
-#define TICK_MIN(a, b) ((((b) - (a)) < TICK_MAX_INTERVAL) ? (a) : (b))
+#define TICK_LE(a, b) ((uint64_t)((b) - (a)) < TICK_MAX_INTERVAL ? true : false)
+#define TICK_GT(a, b) ((uint64_t)((b) - (a)) > TICK_MAX_INTERVAL ? true : false)
+#define TICK_MAX(a, b) (((uint64_t)((b) - (a)) < TICK_MAX_INTERVAL) ? (b) : (a))
+#define TICK_MIN(a, b) (((uint64_t)((b) - (a)) < TICK_MAX_INTERVAL) ? (a) : (b))
 #define TICK_REL_TIME(a, b) ((b) - (a))
 
 #endif // TIME_REQUIRES_MODULO

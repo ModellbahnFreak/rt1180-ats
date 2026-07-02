@@ -37,7 +37,7 @@ int ats_time_init(ats_time_alarm_callback_t callback)
         return -1;
     }
 
-    if (ats_time_callback != NULL)
+    if (callback != NULL)
     {
         ats_time_callback = callback;
     }
@@ -83,8 +83,9 @@ int ats_time_set_alarm(uint64_t time)
 
 int ats_time_cancel_alarm()
 {
-    counter_cancel_channel_alarm(ats_time_dev, 0);
-    ats_time_alarm_time.valid = true;
+    int res = counter_cancel_channel_alarm(ats_time_dev, 0);
+    ats_time_alarm_time.valid = false;
+    return res;
 }
 
 #elif DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_netc_ptp_clock)
@@ -120,7 +121,7 @@ int ats_time_init(ats_time_alarm_callback_t callback)
 
     LOG_DBG("Using ptp as time source and gpt as interrupt timer");
 
-    if (ats_time_callback != NULL)
+    if (callback != NULL)
     {
         ats_time_callback = callback;
     }
@@ -138,6 +139,9 @@ int ats_time_set_alarm(uint64_t time)
     uint64_t now;
     ats_time_get(&now);
     time = (time - now) * 24 / 100;
+#ifdef CONFIG_ATS_ASSERT_ON_SEND
+    __ASSERT(time < (1LL << 31), "Cannot set counter alarm callback more than %" PRId64 " in the future!", (1LL << 31));
+#endif
     struct counter_alarm_cfg alarm = {
         .callback = ats_time_counter_alarm_cb,
         .flags = 0,
@@ -151,8 +155,9 @@ int ats_time_set_alarm(uint64_t time)
 
 int ats_time_cancel_alarm()
 {
-    counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
-    ats_time_alarm_time.valid = true;
+    int res = counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
+    ats_time_alarm_time.valid = false;
+    return res;
 }
 
 #elif !DT_NODE_EXISTS(ATS_COUNTER)
@@ -172,7 +177,7 @@ int ats_time_init(ats_time_alarm_callback_t callback)
 {
     LOG_WRN("Using zephyr uptime as time source (NOT GRANULAR ENOUGH!) with frequency %" PRId32 " Hz as", TICKS_PER_SECOND);
 
-    if (ats_time_callback != NULL)
+    if (callback != NULL)
     {
         ats_time_callback = callback;
     }
@@ -197,7 +202,7 @@ int ats_time_set_alarm(uint64_t time)
 int ats_time_cancel_alarm()
 {
     k_timer_stop(&ats_time_timer);
-    ats_time_alarm_time.valid = true;
+    ats_time_alarm_time.valid = false;
 }
 
 #endif
