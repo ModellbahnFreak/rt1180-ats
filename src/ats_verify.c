@@ -9,37 +9,37 @@ LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 
 #define NUM_STREAMS CONFIG_ATS_SCHEDULER_INSTANCES
 
-struct ats_verify_sent_event
+struct ats_verify_sent_event //24byte
 {
-    void *streamId;
     uint64_t timestamp;
     uint64_t elegibilityTime;
+    void *streamId;
     uint16_t packetSize;
 };
 
-struct ats_verify_stream_t
+struct ats_verify_stream_t //32byte
 {
+    uint64_t lastUpdate;
     void *streamId;
     struct ats_verify_iface_t *ats_iface;
     int32_t bucket;
-    uint64_t lastUpdate;
     uint32_t tokensPerSecond;
     uint32_t burstSize;
 };
 
-struct ats_verify_iface_t
+struct ats_verify_iface_t //16byte
 {
-    void *ats_data;
     uint64_t lastElegibilityTime;
+    void *ats_data;
 };
 
 struct ats_verify_t
 {
     struct ats_verify_sent_event events[128];
-    uint8_t producerIdx;
-    uint8_t consumerIdx;
     struct ats_verify_stream_t streams[CONFIG_ATS_SCHEDULER_INSTANCES];
     struct ats_verify_iface_t ifaces[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
+    uint8_t producerIdx;
+    uint8_t consumerIdx;
 };
 
 static bool finish = false;
@@ -102,6 +102,7 @@ void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t t
     }
     __ASSERT(stream->ats_iface != NULL, "no free iface in verifier found to set params");
 
+    stream->streamId = streamId;
     stream->ats_iface->ats_data = ats_data;
     stream->tokensPerSecond = tokensPerSecond;
     stream->burstSize = burstSize;
@@ -123,8 +124,8 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
             unsigned int key = irq_lock();
             if (ats_verify_instance.consumerIdx == ats_verify_instance.producerIdx)
             {
-                break;
                 irq_unlock(key);
+                break;
             }
             i = ats_verify_instance.consumerIdx;
             ats_verify_instance.consumerIdx = (ats_verify_instance.consumerIdx + 1) & 0x7f;
