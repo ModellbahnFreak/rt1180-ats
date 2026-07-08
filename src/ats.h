@@ -53,9 +53,19 @@ struct ats
 struct ats *ats_init(struct net_if *iface);
 
 /**
- * @brief find the ats structure for the given interface
+ * @brief find the first ats structure for the given interface
+ *
+ * IMPORTANT: Does not include ats_iface instances.
  */
 struct ats *ats_get_by_net_if(struct net_if *iface);
+
+/**
+ * @brief Returns the group id for the specified stream
+ *
+ * @return The id of the group in [0, CONFIG_ATS_GROUP_INSTANCES-1] when scheduler with given id is initialized,
+ *          CONFIG_ATS_GROUP_INSTANCES when the scheduler with the gifen id isn't initialized yet.
+ */
+uint8_t ats_get_group_id(struct ats *ats_data, uint8_t schedId);
 
 /**
  * @brief Allocate the first free ATS scheduler with the given parameters

@@ -2,13 +2,14 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/ethernet.h>
+#include "ats_iface.h"
 #include "ats.h"
 #include "sender.h"
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
 #define useStaticBuf
-#define sendDirectAts
+// #define sendDirectAts
 
 static __noinit uint8_t sender_buf[1500];
 
@@ -35,7 +36,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
     struct ats *ats_data = ats_get_by_net_if(params->iface);
     uint8_t schedId = ats_register_stream(ats_data, -1, maxTokenRate, params->maxPacket * 3 / 2);
 #else
-// todo: send via iface
+    uint8_t schedId = ats_iface_register_stream(params->iface, maxTokenRate, params->maxPacket * 3 / 2);
 #endif
 
     if (params->regular)
@@ -61,7 +62,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
 #ifndef sendDirectAts
         net_buf_reserve(buf, 14);
-        net_pkt_set_priority(buf, /*todo register streamId*/);
+        net_pkt_set_ats_stream(pkt, schedId);
 #endif
 
         net_pkt_set_ll_proto_type(pkt, 0x0842);
@@ -71,9 +72,11 @@ void sender(void *sender_parameters, void *p2, void *p3)
 #else
         struct net_pkt *pkt = net_pkt_alloc_with_buffer(params->iface, params->maxPacket, NET_AF_UNSPEC, 0, K_FOREVER);
         net_pkt_set_ll_proto_type(pkt, 0x0842);
+        net_pkt_memset(pkt, 0xff, 14);
         net_pkt_write_le32(pkt, 0);
-        net_pkt_memset(pkt, 0xff, params->maxPacket);
+        net_pkt_memset(pkt, 0xff, params->maxPacket - 14 - 4);
         ((struct net_eth_hdr *)sender_buf)->type = net_pkt_ll_proto_type(pkt);
+        net_pkt_set_ats_stream(pkt, schedId);
 #endif
 
 #ifdef sendDirectAts
@@ -85,13 +88,13 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
         while (true)
         {
-            net_pkt_ref(pkt);
 
             LOG_INF("App %d trying to send %d bytes, then waiting %d us", (int)appId, net_pkt_get_len(pkt), params->minIntervalUs);
 
 #ifdef sendDirectAts
             ats_send(ats_data, schedId, pkt);
 #else
+            net_pkt_ref(pkt);
             pkt->buffer->data = pkt->buffer->__buf + 14; // reserve space for ethernet headers, reference get_reserve_ll_header_size; can't use net_buf_reserve as it requires the buffer to be empty but we want to overwrite
             pkt->buffer->len = pkt->buffer->size - 14;
 
@@ -112,8 +115,19 @@ void sender(void *sender_parameters, void *p2, void *p3)
             net_pkt_write_be32(pkt, counter++);
             net_pkt_memset(pkt, 2, params->maxPacket);
             LOG_INF("App %d trying to send %d bytes, then waiting %d us", (int)appId, net_pkt_get_len(pkt), sleepTime);
-            net_pkt_set_ll_proto_type(pkt, 0x22f0);
+
+#ifdef sendDirectAts
+            uint8_t broadcast[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+                    net_linkaddr_set(net_pkt_lladdr_dst(pkt),
+                                    broadcast,
+                                    sizeof(broadcast));
             ats_send(ats_data, schedId, pkt);
+#else
+            net_pkt_set_ll_proto_type(pkt, 0x22f0);
+            net_pkt_set_ats_stream(pkt, schedId);
+            net_send_data(pkt);
+#endif
+
             k_sleep(K_USEC(sleepTime));
         }
     }

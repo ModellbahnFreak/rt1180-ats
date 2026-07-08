@@ -105,6 +105,12 @@ struct ats *ats_get_by_net_if(struct net_if *iface)
     return NULL;
 }
 
+uint8_t ats_get_group_id(struct ats *ats_data, uint8_t schedId)
+{
+    __ASSERT(schedId >= 0 && schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "Invalid scheduler id %d to get the group id for", schedId);
+    return ats_data->scheduler[schedId].schedulerGroup;
+}
+
 uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPerSecond, uint32_t burstSize)
 {
     __ASSERT(ats_data != NULL, "no ats structure passed");
@@ -165,7 +171,9 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #ifdef CONFIG_ATS_VERIFY_ENABLED
     ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
 #endif
-    return netc_eth_tx(group->parent->ifaceDevice, pkt);
+    int res = netc_eth_tx(group->parent->ifaceDevice, pkt);
+    net_pkt_unref(pkt);
+    return res;
 }
 
 /**
@@ -256,7 +264,7 @@ ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size
     return elegebilityTime;
 }
 
-int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, uint64_t *outUsedNow)
+int ats_update_counter_alarm_tmp(uint64_t nextElegibilityTime, bool timerExpired, uint64_t *outUsedNow)
 {
     uint64_t counterVal;
     if (outUsedNow == NULL)
@@ -268,7 +276,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
     nextElegibilityTime = TICK_NORMALIZE(nextElegibilityTime);
     ats_time_t alarm_time;
     ats_time_get_alarm(&alarm_time);
-    LOG_DBG("now: %" PRId64 ", elegible: %" PRId64 ", alarm valid: %d, alarm time: %" PRId64, *outUsedNow, nextElegibilityTime, alarm_time.valid, alarm_time.tick);
+    LOG_DBG("now: %" PRIu64 ", elegible: %" PRIu64 ", alarm valid: %d, alarm time: %" PRIu64, *outUsedNow, nextElegibilityTime, alarm_time.valid, alarm_time.tick);
 
     if (TICK_LE(nextElegibilityTime, *outUsedNow))
     {
@@ -345,6 +353,15 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
     return -1; // unreachable
 }
 
+int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, uint64_t *outUsedNow)
+{
+    uint64_t timeAfter;
+    int res = ats_update_counter_alarm_tmp(nextElegibilityTime, timerExpired, outUsedNow);
+    ats_time_get(&timeAfter);
+    LOG_DBG("time needed for update: %" PRIu64, TICK_REL_TIME(*outUsedNow, timeAfter));
+    return res;
+}
+
 void ats_counter_alarm_cb(uint64_t ticks)
 {
     LOG_DBG("counter alarm at %" PRId64, ticks);
@@ -416,6 +433,8 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     ats_data->scheduler[schedId].bucketEmptyTimeTicks = newBucketEmptyTime;
     ats_data->group[groupId].groupElegibilityTimeTicks = elegibilityTime.tick;
     k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
+
+    net_pkt_ref(pkt);
 
     atomic_val_t oldLen = atomic_inc(&(ats_data->group[groupId].queueLen));
     if (oldLen > 0)
