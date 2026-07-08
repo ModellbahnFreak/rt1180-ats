@@ -156,8 +156,8 @@ static int ats_iface_init(const struct device *dev)
 
 int ats_iface_tx(const struct device *dev, struct net_pkt *pkt)
 {
-    LOG_DBG("ATS-send!");
-    return 0;
+    struct ats_iface_data *data = dev->data;
+    return ats_send(data->ats_data, pkt->ats_stream, pkt);
 }
 
 enum ethernet_hw_caps ats_iface_get_capabilities(const struct device *dev)

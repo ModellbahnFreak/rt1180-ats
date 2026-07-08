@@ -1,5 +1,13 @@
 mainmenu "Asynchronous Traffic Shaping IEEE 802.1Qcr"
 
+menuconfig ATS_SOFTWARE_DRIVER
+	bool "Enable ats software implementation"
+	default y
+	help
+	  Enables all ATS specific code and further configuration
+
+if ATS_SOFTWARE_DRIVER
+
 config ATS_NUM_INTERFACES
 	int "Number of interfaces/traffic classes with ATS support"
 	default 0
@@ -82,5 +90,7 @@ config ATS_VERIFY_LOG_LEVEL
 	help
 	  The verbosity of the ATS verification.
 	  0: none, 1: only errors in verifyer code, 2: warn if ATS did not comply to specification, 3: regular info of bucket states, 4: debug info from verifyer
+
+endif
 
 source "Kconfig.zephyr"
