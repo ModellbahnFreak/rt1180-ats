@@ -30,6 +30,13 @@ struct ats_iface_data
 
 int ats_iface_tx(const struct device *dev, struct net_pkt *pkt);
 
+bool ats_iface_is_ats(struct net_if *ats_if)
+{
+    const struct device *dev = net_if_get_device(ats_if);
+    const struct ethernet_api *api = dev->api;
+    return api != NULL && api->send == ats_iface_tx;
+}
+
 static inline struct ats_iface_data *ats_iface_get_data(struct net_if *iface)
 {
     const struct device *dev = net_if_get_device(iface);
