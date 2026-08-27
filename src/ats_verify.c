@@ -9,7 +9,7 @@ LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 
 #define NUM_STREAMS CONFIG_ATS_SCHEDULER_INSTANCES
 
-struct ats_verify_sent_event //24byte
+struct ats_verify_sent_event // 24byte
 {
     uint64_t timestamp;
     uint64_t elegibilityTime;
@@ -17,7 +17,7 @@ struct ats_verify_sent_event //24byte
     uint16_t packetSize;
 };
 
-struct ats_verify_stream_t //32byte
+struct ats_verify_stream_t // 32byte
 {
     uint64_t lastUpdate;
     void *streamId;
@@ -27,44 +27,51 @@ struct ats_verify_stream_t //32byte
     uint32_t burstSize;
 };
 
-struct ats_verify_iface_t //16byte
+struct ats_verify_iface_t // 16byte
 {
     uint64_t lastElegibilityTime;
     void *ats_data;
 };
 
+#define CONFIG_ATS_VERIFY_NUM_EVENTS 2500
+
 struct ats_verify_t
 {
-    struct ats_verify_sent_event events[128];
+    struct ats_verify_sent_event events[CONFIG_ATS_VERIFY_NUM_EVENTS];
     struct ats_verify_stream_t streams[CONFIG_ATS_SCHEDULER_INSTANCES];
     struct ats_verify_iface_t ifaces[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
-    uint8_t producerIdx;
-    uint8_t consumerIdx;
+    uint16_t producerIdx;
+    uint16_t consumerIdx;
 };
 
 static bool finish = false;
 struct ats_verify_t ats_verify_instance;
 
-void ats_verify_packet_sent(void *streamId, uint16_t packetSize, uint64_t elegibilityTime)
+void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime)
 {
-    uint8_t i;
+    uint16_t i;
     unsigned int key = irq_lock();
 #ifndef CONFIG_ATS_VERIFY_NO_PROCESSING
-    if (((ats_verify_instance.producerIdx + 1) & 0x7f) == ats_verify_instance.consumerIdx)
+    if (((ats_verify_instance.producerIdx + 1) % CONFIG_ATS_VERIFY_NUM_EVENTS) == ats_verify_instance.consumerIdx)
     {
         irq_unlock(key);
-        LOG_ERR("verify queue full, dropping event");
+        LOG_WRN("verify queue full, dropping event");
         return;
     }
 #endif
     i = ats_verify_instance.producerIdx;
-    ats_verify_instance.producerIdx = (ats_verify_instance.producerIdx + 1) & 0x7f;
+    ats_verify_instance.producerIdx = (ats_verify_instance.producerIdx + 1) % CONFIG_ATS_VERIFY_NUM_EVENTS;
     irq_unlock(key);
     struct ats_verify_sent_event *write = &ats_verify_instance.events[i];
     write->streamId = streamId;
-    write->packetSize = packetSize;
+    write->packetSize = net_pkt_get_len(pkt);
     write->elegibilityTime = elegibilityTime;
     ats_time_get(&(write->timestamp));
+    if (write->packetSize >= 40)
+    {
+        *((uint64_t *)(pkt->buffer->__buf + 28)) = elegibilityTime;
+        *((uint64_t *)(pkt->buffer->__buf + 36)) = write->timestamp;
+    }
 }
 
 void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t tokensPerSecond, uint32_t burstSize)
@@ -106,6 +113,7 @@ void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t t
     stream->ats_iface->ats_data = ats_data;
     stream->tokensPerSecond = tokensPerSecond;
     stream->burstSize = burstSize;
+    stream->bucket = burstSize;
 }
 
 void ats_verify_thread_entry(void *param1, void *param2, void *param3)
@@ -120,7 +128,7 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
     {
         while (true /*read all events, canceled with break*/)
         {
-            uint8_t i;
+            uint16_t i;
             unsigned int key = irq_lock();
             if (ats_verify_instance.consumerIdx == ats_verify_instance.producerIdx)
             {
@@ -128,7 +136,7 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
                 break;
             }
             i = ats_verify_instance.consumerIdx;
-            ats_verify_instance.consumerIdx = (ats_verify_instance.consumerIdx + 1) & 0x7f;
+            ats_verify_instance.consumerIdx = (ats_verify_instance.consumerIdx + 1) % CONFIG_ATS_VERIFY_NUM_EVENTS;
             irq_unlock(key);
 
             struct ats_verify_sent_event *evt = &ats_verify_instance.events[i];
@@ -147,10 +155,9 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
             }
             __ASSERT(stream != NULL, "stream %p for saved timing data not found in verifier", evt->streamId);
 
-            // assumes only one send interface / pcp class!
             if (evt->elegibilityTime < stream->ats_iface->lastElegibilityTime)
             {
-                LOG_WRN("A packet with smaller elegibility time %d was sent after another packet with %d", evt->elegibilityTime, stream->ats_iface->lastElegibilityTime);
+                LOG_WRN("A packet with smaller elegibility time %" PRIu64 " was sent after another packet with %" PRIu64 "", evt->elegibilityTime, stream->ats_iface->lastElegibilityTime);
             }
 
             uint64_t jitter = evt->timestamp - evt->elegibilityTime;
@@ -158,7 +165,21 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
             uint64_t timeSinceLast = evt->timestamp - stream->lastUpdate;
             uint32_t rate = (uint64_t)(evt->packetSize) * TIME_NS / timeSinceLast;
 
-            LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %d, sent at %d, jitter %d", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->timestamp, jitter);
+            int64_t tokensSinceLast = timeSinceLast * stream->tokensPerSecond / TIME_NS;
+            stream->bucket = MIN((stream->bucket + tokensSinceLast), stream->burstSize);
+            int32_t newBucket = stream->bucket - (int32_t)evt->packetSize;
+
+            LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %" PRIu64 ", sent at %" PRIu64 ", jitter %" PRIu64 ", bucket: %" PRId32 "=>%" PRId32 ", since last: %" PRIu64 "", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->timestamp, jitter, stream->bucket, newBucket, timeSinceLast);
+
+            if (newBucket < 0)
+            {
+                LOG_ERR("stream %p sent %d bytes when bucket only held %" PRId32 " bytes. ATS CONSTRAINTS VIOLATED", evt->streamId, evt->packetSize, stream->bucket);
+                stream->bucket = 0;
+            }
+            else
+            {
+                stream->bucket = newBucket;
+            }
 
             stream->lastUpdate = evt->timestamp;
             stream->ats_iface->lastElegibilityTime = evt->elegibilityTime;

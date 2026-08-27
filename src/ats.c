@@ -169,7 +169,7 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
     net_pkt_set_iface(pkt, group->parent->iface);
     net_pkt_cursor_init(pkt);
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_packet_sent(group, net_pkt_get_len(pkt), elegibilityTime);
+    ats_verify_packet_sent(group, pkt, elegibilityTime);
 #endif
     int res = netc_eth_tx(group->parent->ifaceDevice, pkt);
     net_pkt_unref(pkt);
