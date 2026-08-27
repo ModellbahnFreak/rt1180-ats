@@ -93,4 +93,25 @@ config ATS_VERIFY_LOG_LEVEL
 
 endif
 
+config NETC_SPEEDTEST_ENABLED
+	bool "Build the nxp netx speedtest functionality"
+	default n
+	help
+	  Provides the function speedtest_start to evaluate the send speed of a netc interface
+
+if NETC_SPEEDTEST_ENABLED
+
+config ATS_SPEEDTEST_MAX_INSTANCES
+	int "Number of instances of speedtest_start that can be run in parallel"
+	default 2
+
+config ATS_SPEEDTEST_BUF_SIZE
+	int "Timestamp buffer size in bytes"
+	default 10240
+	help
+	  How many bytes to allocate for storing timestamps of the speedtest.
+	  Maximum numer of timestamps per instance = floor(ATS_SPEEDTEST_BUF_SIZE / 8 / ATS_SPEEDTEST_MAX_INSTANCES)
+
+endif
+
 source "Kconfig.zephyr"
