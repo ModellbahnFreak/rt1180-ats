@@ -137,14 +137,17 @@ void ats_time_get(uint64_t *now)
 int ats_time_set_alarm(uint64_t time)
 {
     uint64_t now;
+    uint32_t nowGpt;
     ats_time_get(&now);
+    counter_get_value(ats_time_gpt_dev, &nowGpt);
     time = (time - now) * 24 / 100;
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(time < (1LL << 31), "Cannot set counter alarm callback more than %" PRId64 " in the future!", (1LL << 31));
 #endif
+    time += nowGpt;
     struct counter_alarm_cfg alarm = {
         .callback = ats_time_counter_alarm_cb,
-        .flags = 0,
+        .flags = COUNTER_ALARM_CFG_ABSOLUTE,
         .ticks = time};
 
     counter_cancel_channel_alarm(ats_time_gpt_dev, 0);

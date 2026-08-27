@@ -74,14 +74,16 @@ void ptp_clock_config_alarm(const struct device *dev, struct netc_ptp_clock_alar
 			break;
 		}
 	}
+#ifdef CONFIG_ATS_ASSERT_ON_SEND
 	__ASSERT(priority != (unsigned int)-1, "Could not find irq number for given ptp clock");
+	__ASSERT(config != NULL, "No configuration for ptp timer alarm provided");
+#endif
 	irq_connect_dynamic(irqNum,
 						priority,
 						netc_ptp_clock_isr, dev, 0);
 	irq_enable(irqNum);
 
 	struct ptp_clock_nxp_netc_data *data = dev->data;
-	__ASSERT(config != NULL, "No configuration for ptp timer alarm provided");
 	netc_timer_alarm_index_t alarmIndex = ptp_clock_get_alarm_index(config->alarmIndex);
 	netc_timer_alarm_t alarm = {
 		.enableInterrupt = true,
