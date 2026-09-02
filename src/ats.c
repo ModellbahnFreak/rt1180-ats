@@ -434,6 +434,10 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     ats_data->group[groupId].groupElegibilityTimeTicks = elegibilityTime.tick;
     k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
 
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+    ats_verify_packet_enqueued(&(ats_data->group[groupId]), pkt, now);
+#endif
+
     net_pkt_ref(pkt);
 
     atomic_val_t oldLen = atomic_inc(&(ats_data->group[groupId].queueLen));

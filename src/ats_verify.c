@@ -1,6 +1,8 @@
 #include "ats_verify.h"
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/net/ptp_time.h>
+#include <zephyr/net/ethernet.h>
 #include "ats_time.h"
 #include <zephyr/logging/log.h>
 #include "constants.h"
@@ -42,10 +44,46 @@ struct ats_verify_t
     struct ats_verify_iface_t ifaces[CONFIG_ATS_STRUCT_ITERABLE_SIZE];
     uint16_t producerIdx;
     uint16_t consumerIdx;
+    struct net_if_timestamp_cb timestampCbHandle;
+    uint64_t lastTransmitTimestamp;
+    uint64_t lastTransmitTimestampPacketId;
 };
 
 static bool finish = false;
 struct ats_verify_t ats_verify_instance;
+
+void ats_verify_timestamp_callback(struct net_pkt *pkt)
+{
+    ats_verify_instance.lastTransmitTimestamp = net_pkt_timestamp_ns(pkt);
+    uint8_t offset = 14;
+    if (net_pkt_ll_proto_type(pkt) == NET_ETH_PTYPE_PTP)
+    {
+        offset = 64;
+    }
+    ats_verify_instance.lastTransmitTimestampPacketId = *((uint64_t *)(pkt->buffer->__buf + offset));
+}
+
+void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t arrivalTime)
+{
+    uint8_t offset = 14;
+    if (net_pkt_ll_proto_type(pkt) == NET_ETH_PTYPE_PTP)
+    {
+        net_pkt_set_tx_timestamping(pkt, true);
+
+        offset = 64;
+    }
+
+    if (net_pkt_get_len(pkt) >= offset + 16)
+    {
+        *((uint64_t *)(pkt->buffer->__buf + offset + 8)) = arrivalTime;
+
+        if (net_pkt_get_len(pkt) >= offset + 48)
+        {
+            *((uint64_t *)(pkt->buffer->__buf + offset + 32)) = ats_verify_instance.lastTransmitTimestamp;
+            *((uint64_t *)(pkt->buffer->__buf + offset + 40)) = ats_verify_instance.lastTransmitTimestampPacketId;
+        }
+    }
+}
 
 void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime)
 {
@@ -67,10 +105,22 @@ void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegib
     write->packetSize = net_pkt_get_len(pkt);
     write->elegibilityTime = elegibilityTime;
     ats_time_get(&(write->timestamp));
-    if (write->packetSize >= 40)
+
+    uint8_t offset = 14;
+    if (net_pkt_ll_proto_type(pkt) == NET_ETH_PTYPE_PTP)
     {
-        *((uint64_t *)(pkt->buffer->__buf + 28)) = elegibilityTime;
-        *((uint64_t *)(pkt->buffer->__buf + 36)) = write->timestamp;
+        net_pkt_set_timestamp_ns(pkt, write->timestamp);
+        struct net_ptp_time *t = net_pkt_timestamp(pkt);
+        *((uint32_t *)(pkt->buffer->__buf + offset + 34)) = net_htonl(t->_sec.high);
+        *((uint16_t *)(pkt->buffer->__buf + offset + 38)) = net_htons(t->_sec.low);
+        *((uint32_t *)(pkt->buffer->__buf + offset + 40)) = net_htonl(t->nanosecond);
+        offset = 64;
+    }
+
+    if (write->packetSize >= offset + 32)
+    {
+        *((uint64_t *)(pkt->buffer->__buf + offset + 16)) = elegibilityTime;
+        *((uint64_t *)(pkt->buffer->__buf + offset + 24)) = write->timestamp;
     }
 }
 
@@ -114,6 +164,8 @@ void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t t
     stream->tokensPerSecond = tokensPerSecond;
     stream->burstSize = burstSize;
     stream->bucket = burstSize;
+
+    net_if_register_timestamp_cb(&ats_verify_instance.timestampCbHandle, NULL, NULL, ats_verify_timestamp_callback);
 }
 
 void ats_verify_thread_entry(void *param1, void *param2, void *param3)
