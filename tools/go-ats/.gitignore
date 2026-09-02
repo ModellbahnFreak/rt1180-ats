@@ -1,5 +1,6 @@
 log.csv
 log.xlsx
+timing*.csv
 
 ## Go-Gitignore from https://github.com/github/gitignore/blob/main/Go.gitignore published under CC0 License
 
