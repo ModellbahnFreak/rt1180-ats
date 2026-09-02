@@ -20,13 +20,15 @@ LOG_MODULE_REGISTER(net_pkt_sock_sample, LOG_LEVEL_DBG);
 #include <zephyr/posix/sys/socket.h>
 #include <zephyr/posix/unistd.h>
 
+#ifdef CONFIG_ATS_SOFTWARE_DRIVER
 #include "ats.h"
+#include "ats_iface.h"
 #include "sender.h"
-#include "speedtest.h"
+#endif
 
-#define CONFIG_NET_SAMPLE_SEND_WAIT_TIME 1000
-#define CONFIG_NET_SAMPLE_ENABLE_PACKET_DGRAM
-#define CONFIG_NET_SAMPLE_DESTINATION_ADDR "01:00:5e:00:00:00"
+#ifdef CONFIG_NETC_SPEEDTEST_ENABLED
+#include "speedtest.h"
+#endif
 
 #define STACK_SIZE 1024
 #if defined(CONFIG_NET_TC_THREAD_COOPERATIVE)
@@ -34,32 +36,21 @@ LOG_MODULE_REGISTER(net_pkt_sock_sample, LOG_LEVEL_DBG);
 #else
 #define THREAD_PRIORITY K_PRIO_PREEMPT(8)
 #endif
-#define RECV_BUFFER_SIZE 1280
-#define WAIT_TIME CONFIG_NET_SAMPLE_SEND_WAIT_TIME
 
-#define FLOOD (CONFIG_NET_SAMPLE_SEND_WAIT_TIME ? 0 : 1)
-
-#define LAN_NODE DT_ALIAS(ethpseudo)
-int port_idx = 3;
+#define LAN_NODE DT_ALIAS(ats)
 
 static struct k_sem quit_lock;
 
 static bool finish;
 static K_SEM_DEFINE(iface_up, 0, 1);
-const struct device *if_dev_a = DEVICE_DT_GET(LAN_NODE);
+static const char *iface_dev_name = DT_NODE_FULL_NAME(LAN_NODE);
+const struct device *if_dev_a; // = DEVICE_DT_GET(LAN_NODE);
 struct net_if *iface;
-
-// K_THREAD_STACK_DEFINE(sender_thread_stack, STACK_SIZE);
-
-const char lorem_ipsum_a[] = "Interface A" LOREM_IPSUM;
-
-static void quit(void)
-{
-	k_sem_give(&quit_lock);
-}
 
 static void find_actual_iface()
 {
+	if_dev_a = device_get_binding(iface_dev_name);
+
 	iface = net_if_lookup_by_dev(if_dev_a);
 
 	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET))
@@ -67,22 +58,6 @@ static void find_actual_iface()
 		LOG_ERR("Interface not an ethernet interface!");
 		return;
 	}
-
-#ifdef CONFIG_NET_DSA
-	if ((net_eth_get_hw_capabilities(iface) & ETHERNET_DSA_CONDUIT_PORT))
-	{
-		struct net_if *user = dsa_user_get_iface(iface, port_idx);
-		if (user == NULL)
-		{
-			LOG_ERR("Port %d of DSA interface not found", port_idx);
-			return;
-		}
-		LOG_INF("User interface %d found.", net_if_get_by_iface(user));
-
-		iface = user;
-		return;
-	}
-#endif
 }
 
 static void iface_up_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *changed_iface) //(uint64_t mgmt_event, struct net_if *changed_iface, void *info, size_t info_length, void *user_data)
@@ -96,9 +71,6 @@ static void iface_up_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_e
 // NET_MGMT_REGISTER_EVENT_HANDLER(iface_up_cb, NET_EVENT_IF_UP, iface_up_handler, NULL);
 static void wait_for_interface(void)
 {
-	// struct net_if *iface = net_if_get_default();
-	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
-
 	if (net_if_is_up(iface))
 	{
 		return;
@@ -115,6 +87,7 @@ static void wait_for_interface(void)
 	net_mgmt_del_event_callback(&iface_up_cb);
 }
 
+#ifdef CONFIG_ATS_SOFTWARE_DRIVER
 K_HEAP_DEFINE(sender_thread_heap, sizeof(struct sender_params) * 5);
 static K_THREAD_STACK_ARRAY_DEFINE(sender_thread_stack, 5, STACK_SIZE);
 static struct k_thread sender_thread_data[5];
@@ -136,15 +109,21 @@ void start_sender(struct net_if *iface, uint16_t maxPacket, uint32_t minTUs, uin
 		sender, params, NULL, NULL,
 		THREAD_PRIORITY, 0, K_NO_WAIT);
 }
+#else
+#define start_sender(struct net_if *iface, uint16_t maxPacket, uint32_t minTUs, uint32_t maxTUs, bool regular) \
+	{                                                                                                          \
+	}
+#endif
 
 int main(void)
 {
 	LOG_WRN("Hello world!");
 
-	// struct net_if *iface = net_if_lookup_by_dev(if_dev_a);
 	find_actual_iface();
-	// todo? auto init for iface
-	ats_init(iface);
+	if (!ats_iface_is_ats(iface))
+	{
+		ats_init(iface);
+	}
 
 	k_sem_init(&quit_lock, 0, K_SEM_MAX_LIMIT);
 
@@ -152,16 +131,14 @@ int main(void)
 
 	LOG_INF("Packet socket sample is running");
 
-	start_sender(iface, 100, 1000000, 2000000, true);
+	start_sender(iface, 1500, 100000, 200000, true);
 	//   start_sender(iface, 100, 1000000, 2000000, false);
 
-	//speedtest_start(iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1, false);
+	// speedtest_start(iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1, false);
 
 	k_sem_take(&quit_lock, K_FOREVER);
 
 	LOG_INF("Stopping...");
-
-	finish = true;
 
 	return 0;
 }
