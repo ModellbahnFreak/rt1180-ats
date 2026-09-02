@@ -30,6 +30,8 @@ var (
 	binOrder              = binary.LittleEndian
 	binSize               = binary.Size(startTimestamp)
 	verbose               = false
+	byteOffset            = 0
+	byteSkip              = 0
 )
 
 func init() {
@@ -37,7 +39,10 @@ func init() {
 	flag.Int64Var(&startTimestamp, "start", startTimestamp, "Start timestamp to which all the others are relative. Not required")
 	flag.Int64Var(&ticksPerSecond, "frequency", ticksPerSecond, "The frequency of the time (in ticks per second/Hz). Assumed to be 1GHz (=nanoseconds)")
 	flag.IntVar(&numInstances, "instances", numInstances, "(Max) Number of speedtest instrances represented in the data.")
+	flag.IntVar(&numSteps, "steps", numInstances, "Number of steps per iteration")
 	flag.BoolVar(&verbose, "verbose", verbose, "Increase output verbosity. (Log all times and values)")
+	flag.IntVar(&byteOffset, "offset", byteOffset, "Number of bytes offset before the first entry.")
+	flag.IntVar(&byteSkip, "skip", byteSkip, "Number of bytes to skip between EVERY entry.")
 }
 
 func main() {
@@ -48,10 +53,11 @@ func main() {
 		log.Fatalln("could not read file ", inFile, err)
 	}
 
-	requiredMod := (binSize * numInstances * numSteps)
+	requiredMod := ((binSize + byteSkip) * numInstances * numSteps)
 	if len(data)%requiredMod != 0 {
-		log.Fatalf("binary data not properly formatted. Length %d not divisible by %d (=%d (uint64) * %d (numInstances) * %d (numSteps))", len(data), requiredMod, binSize, numInstances, numSteps)
+		log.Fatalf("binary data not properly formatted. Length %d not divisible by %d (=(%d (uint64) + %d (byteSkip)) * %d (numInstances) * %d (numSteps))", len(data), requiredMod, binSize, byteSkip, numInstances, numSteps)
 	}
+	binSize += byteSkip
 
 	var threadTiming [][]timeEvent = make([][]timeEvent, numInstances)
 	smallestIndex := make([]int, numInstances)
@@ -63,7 +69,7 @@ func main() {
 	var firstEmpty []int = make([]int, numInstances)
 
 	// find current start of ring buffer (for each thread)
-	for i := 0; i < len(data); i += binSize {
+	for i := byteOffset; i < len(data); i += binSize {
 		thread := (i / binSize) % numInstances
 		v := binOrder.Uint64(data[i:]) & timeFlagMask
 		if v != 0 && (smallestIndex[thread] == -1 || v < smallestValue[thread]) {
@@ -75,12 +81,13 @@ func main() {
 	for thread := 0; thread < numInstances; thread++ {
 		smallestIteration := int(smallestIndex[thread] / requiredMod)
 		log.Printf("Thread %d Smallest index %d (=> iteration %d => start %d) with value %d", thread, smallestIndex[thread], smallestIteration, smallestIteration*requiredMod, smallestValue[thread])
-		smallestIndex[thread] = smallestIteration * requiredMod
+		smallestIndex[thread] = smallestIteration*requiredMod + byteOffset
 	}
 
 	// Parse all data and write it to threadTiming
 	timeFactor := time.Second / time.Duration(ticksPerSecond)
-	fixRelTimeMode := false
+	fixRelTimeThread := -1
+	fixRelTimeStep := -1
 	if verbose {
 		fmt.Println("Original timestamps:")
 	}
@@ -96,7 +103,7 @@ func main() {
 			step := outIndex % numSteps
 			packet := int(outIndex / numSteps)
 			if verbose {
-				fmt.Printf("%d/%d/%d: %d, 0x%x\n", thread, packet, step, t, flags)
+				fmt.Printf("%d/%d/%d = %d: %d, 0x%x\n", thread, packet, step, i, t, flags)
 			}
 			threadTiming[thread][outIndex] = timeEvent{
 				t:       time.Duration(t+uint64(startTimestamp)) * timeFactor,
@@ -104,20 +111,28 @@ func main() {
 			}
 			if outIndex > numSteps || (outIndex > 0 && threadTiming[thread][outIndex].t-threadTiming[thread][outIndex-1].t > 0) {
 				threadTiming[thread][outIndex].relT = threadTiming[thread][outIndex].t - threadTiming[thread][outIndex-1].t
-				if threadTiming[thread][outIndex].relT < 0 && !fixRelTimeMode {
-					log.Printf("Thread %d Step %d/%d has a negative rel time of %v, this is impossible!!", thread, packet, step, threadTiming[thread][outIndex].relT)
-					log.Printf("Switching to fixing rel time mode")
-					fixRelTimeMode = true
+				if threadTiming[thread][outIndex].relT < 0 && fixRelTimeStep == -1 {
+					fixRelTimeStep = outIndex
+					fixRelTimeThread = thread
 				}
 			}
 			if outIndex%numSteps != numSteps-1 && flags != 0 {
 				log.Fatalf("Thread %d Step %d/%d has flags set outside last step. Likely wrong number of threads!", thread, packet, step)
 			}
 		}
+
+		// don't fix rel time if negative time is due to being the last entry in a series
+		if fixRelTimeThread == thread && fixRelTimeStep == firstEmpty[thread] {
+			fixRelTimeStep = -1
+			fixRelTimeThread = -1
+		}
 	}
 
 	// For earlier captures withh bug in time logging: Fix wrongly ordered times
-	if fixRelTimeMode {
+	if fixRelTimeStep != -1 {
+		log.Printf("Thread %d Step %d/%d has a negative rel time of %v, this is impossible!!", fixRelTimeThread, fixRelTimeStep%numSteps, int(fixRelTimeStep/numSteps), threadTiming[fixRelTimeThread][fixRelTimeStep].relT)
+		log.Printf("Switching to fixing rel time mode")
+
 		var firstToFix timeEvent
 		for thread := 0; thread < numInstances; thread++ {
 			if firstEmpty[thread] == 0 {
