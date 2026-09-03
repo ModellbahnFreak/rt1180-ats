@@ -58,12 +58,12 @@ func main() {
 	if err != nil {
 		log.Printf("Not adding header to output csv file as existing size could not be determined")
 	} else if outInfo.Size() <= 0 {
-		outCsv.Write([]string{"Index", "Enqueue", "Eligibility", "Transmission", "HwTransmission", "t-e", "hwT-e", "Arrival"})
+		outCsv.Write([]string{"Stream", "Index", "Enqueue", "Eligibility", "Transmission", "HwTransmission", "t-e", "hwT-e", "Arrival"})
 		outCsv.Flush()
 	}
 
 	defer func() {
-		packets := flushPackets()
+		packets := flushPackets(-1)
 		for _, p := range packets {
 			outCsv.Write(p.ToCsv())
 		}
