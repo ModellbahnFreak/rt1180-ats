@@ -8,11 +8,14 @@
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
-#define useStaticBuf
-// #define sendDirectAts
-#define pseudoPtpPackets
+#define useStaticBuf // If defined: Manually allocate continuous buffer for all packets, if not defined: Use standard packet allocation from zephyr
+// #define sendDirectAts // If defined: Don't send through zephyr stack but send directly into ats
+#define pseudoPtpPackets // If defined: Format packets as PTPv2 sync messages (e.g. for one-step stimestamping), if not defined: send with all 0xff bytes
 
-static __noinit uint8_t sender_buf[1500];
+#ifdef useStaticBuf
+#define CONFIG_NUM_BUFFERS ((CONFIG_ATS_QUEUE_LENGTH + 1) * 5)
+NET_BUF_POOL_VAR_ALIGN_DEFINE(sender_bufs, CONFIG_NUM_BUFFERS, CONFIG_NUM_BUFFERS * 1500, 0, NULL, 0);
+#endif
 
 struct net_buf_pool *tx_bufs;
 struct net_buf_pool *rx_bufs;
@@ -25,24 +28,13 @@ static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t s
 )
 {
 #ifdef pseudoPtpPackets
-    size = max(size, 14 + 34 + 10 + 6 + 8 + 8 + 8 + 8);
+    size = max(size, 14 + 34 + 10 + 4 + 2 + 7 * 8);
 #endif
 
 #ifdef useStaticBuf
     struct net_pkt *pkt = net_pkt_alloc_on_iface(iface, K_FOREVER);
-    struct net_buf buf_inst = {
-        .ref = 1U,
-        .flags = 0U,
-        .size = size,
-        .user_data_size = 0,
-        .b = {
-            .__buf = sender_buf,
-            .data = sender_buf,
-            .size = size,
-            .len = 0,
-        },
-    };
-    struct net_buf *buf = &buf_inst;
+    struct net_buf *buf = net_buf_alloc_len(&sender_bufs, size, K_NO_WAIT);
+    __ASSERT(buf != NULL, "Couldn't allocate buffer for packet in sender");
     net_buf_reset(buf);
     net_pkt_append_buffer(pkt, buf);
 
@@ -115,6 +107,12 @@ void sender(void *sender_parameters, void *p2, void *p3)
     }
     uint64_t counter = 0;
 
+#ifdef pseudoPtpPackets
+    uint8_t offset = 64;
+#else
+    uint8_t offset = 16;
+#endif
+
     k_tid_t appId = k_current_get();
 #ifdef sendDirectAts
     struct ats *ats_data = ats_get_by_net_if(params->iface);
@@ -137,6 +135,8 @@ void sender(void *sender_parameters, void *p2, void *p3)
 #endif
             );
             net_pkt_set_ats_stream(pkts[i], schedId);
+            *(net_pkt_data(pkts[i]) + offset - 14 - 2) = schedId;
+            *(net_pkt_data(pkts[i]) + offset - 14 - 1) = 0;
         }
 
         i = 0;
@@ -163,13 +163,11 @@ void sender(void *sender_parameters, void *p2, void *p3)
             }
 
             counter++;
-            uint8_t *data = net_pkt_data(pkt);
-            uint8_t offset = 14;
 #ifdef pseudoPtpPackets
-            *((uint16_t *)(data + offset + 30)) = net_htons((uint16_t)counter);
-            offset = 64;
+            uint16_t counterBe = net_htons((uint16_t)counter);
+            memcpy(pkt->buffer->__buf + 14 + 30, &counterBe, sizeof(uint16_t));
 #endif
-            *((uint64_t *)(data + offset)) = counter;
+            memcpy(pkt->buffer->__buf + offset, &counter, sizeof(uint64_t));
 
             k_sleep(K_USEC(params->minIntervalUs));
         }
