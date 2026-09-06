@@ -25,7 +25,7 @@ struct ats_iface_config
 struct ats_iface_data
 {
     struct ats *ats_data;
-    struct net_if *iface;
+    struct net_if *atsIface;
 };
 
 int ats_iface_tx(const struct device *dev, struct net_pkt *pkt);
@@ -37,7 +37,7 @@ bool ats_iface_is_ats(struct net_if *ats_if)
     return api != NULL && api->send == ats_iface_tx;
 }
 
-static inline struct ats_iface_data *ats_iface_get_data(struct net_if *iface)
+struct ats *ats_iface_get_data(struct net_if *iface)
 {
     const struct device *dev = net_if_get_device(iface);
     const struct ethernet_api *api = dev->api;
@@ -45,17 +45,21 @@ static inline struct ats_iface_data *ats_iface_get_data(struct net_if *iface)
     {
         return NULL;
     }
-
-    return dev->data;
+    struct ats_iface_data *data = dev->data;
+    if (data == NULL || data->ats_data == NULL || data->ats_data->iface == NULL)
+    {
+        return NULL;
+    }
+    return data->ats_data;
 }
 
 uint8_t ats_iface_register_stream_to_group(struct net_if *ats_if, int groupId, uint32_t tokensPerSecond, uint32_t burstSize)
 {
-    struct ats_iface_data *data = ats_iface_get_data(ats_if);
+    struct ats *ats_data = ats_iface_get_data(ats_if);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
-    __ASSERT(data != NULL, "The interface given to ats_iface_register_stream_to_group was not an ats_iface");
+    __ASSERT(ats_data != NULL, "The interface given to ats_iface_register_stream_to_group was not an ats_iface");
 #endif
-    return ats_register_stream(data->ats_data, groupId, tokensPerSecond, burstSize);
+    return ats_register_stream(ats_data, groupId, tokensPerSecond, burstSize);
 }
 
 uint8_t ats_iface_register_stream(struct net_if *ats_if, uint32_t tokensPerSecond, uint32_t burstSize)
@@ -65,11 +69,11 @@ uint8_t ats_iface_register_stream(struct net_if *ats_if, uint32_t tokensPerSecon
 
 uint8_t ats_iface_stream_get_group(struct net_if *ats_if, uint8_t streamId)
 {
-    struct ats_iface_data *data = ats_iface_get_data(ats_if);
+    struct ats *ats_data = ats_iface_get_data(ats_if);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
-    __ASSERT(data != NULL, "The interface given to ats_iface_register_stream_to_group was not an ats_iface");
+    __ASSERT(ats_data != NULL, "The interface given to ats_iface_stream_get_group was not an ats_iface");
 #endif
-    return ats_get_group_id(data->ats_data, streamId);
+    return ats_get_group_id(ats_data, streamId);
 }
 
 static struct net_mgmt_event_callback parent_iface_changed_cb;
@@ -114,7 +118,7 @@ static void ats_iface_interface_init(struct net_if *iface)
 {
     const struct device *dev = net_if_get_device(iface);
     struct ats_iface_data *data = dev->data;
-    data->iface = iface;
+    data->atsIface = iface;
 
     struct net_linkaddr *mac = net_if_get_link_addr(data->ats_data->iface);
     net_if_set_link_addr(iface, mac->addr, mac->len, mac->type);
