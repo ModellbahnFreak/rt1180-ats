@@ -1,7 +1,11 @@
 #include "ats_time.h"
 
 #include <zephyr/logging/log.h>
+#ifdef CONFIG_ATS_LOG_LEVEL
 LOG_MODULE_REGISTER(ats_time, CONFIG_ATS_LOG_LEVEL);
+#else
+LOG_MODULE_REGISTER(ats_time);
+#endif
 
 #if DT_NODE_EXISTS(ATS_COUNTER)
 const static struct device *ats_time_dev = DEVICE_DT_GET(ATS_COUNTER);

@@ -8,9 +8,10 @@
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
-#define useStaticBuf // If defined: Manually allocate continuous buffer for all packets, if not defined: Use standard packet allocation from zephyr
-// #define sendDirectAts // If defined: Don't send through zephyr stack but send directly into ats
-#define pseudoPtpPackets // If defined: Format packets as PTPv2 sync messages (e.g. for one-step stimestamping), if not defined: send with all 0xff bytes
+#define useStaticBuf  // If defined: Manually allocate continuous buffer for all packets, if not defined: Use standard packet allocation from zephyr
+#define sendDirectAts // If defined: Don't send through zephyr stack but send directly into ats
+// #define pseudoPtpPackets // If defined: Format packets as PTPv2 sync messages (e.g. for one-step stimestamping), if not defined: send with all 0xff bytes
+#define nodelay
 
 #ifdef useStaticBuf
 #define CONFIG_NUM_BUFFERS ((CONFIG_ATS_QUEUE_LENGTH + 1) * 5)
@@ -27,8 +28,14 @@ static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t s
 #endif
 )
 {
+#ifdef CONFIG_ATS_VERIFY_ENABLED
 #ifdef pseudoPtpPackets
-    size = max(size, 14 + 34 + 10 + 4 + 2 + 7 * 8);
+    size = max(size, 14 + 34 + 10 + 4 + 2 + 7 * 8); // space for mac header, ptp header, ptp time, additional timestamps
+#else
+    size = max(size, 14 + 2 + 7 * 8); // space for mac header, additional timestamps
+#endif
+#else
+    size = max(size, 14 + 2 + 8); // space for mac header, counter
 #endif
 
 #ifdef useStaticBuf
@@ -37,8 +44,9 @@ static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t s
     __ASSERT(buf != NULL, "Couldn't allocate buffer for packet in sender");
     net_buf_reset(buf);
     net_pkt_append_buffer(pkt, buf);
-
+#ifndef sendDirectAts
     net_buf_reserve(buf, 14);
+#endif
     net_pkt_cursor_init(pkt);
 #else
     struct net_pkt *pkt = net_pkt_alloc_with_buffer(iface, size - 14, NET_AF_UNSPEC, 0, K_FOREVER);
@@ -75,13 +83,14 @@ static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t s
 
 #else
     net_pkt_set_ll_proto_type(pkt, 0x0842);
-    net_pkt_write_le32(pkt, 0);
-    net_pkt_memset(pkt, 0xff, size - 14 - 4);
+    net_pkt_write_le16(pkt, 0); // space for stream id
+    net_pkt_memset(pkt, 0, 50); // space for packet counter
+    net_pkt_memset(pkt, 0xff, size - 14 - 52);
 
 #endif
 
 #ifdef sendDirectAts
-    ((struct net_eth_hdr *)sender_buf)
+    ((struct net_eth_hdr *)pkt->buffer->__buf)
         ->type = net_htons(net_pkt_ll_proto_type(pkt));
     uint8_t broadcast[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     net_linkaddr_set(net_pkt_lladdr_dst(pkt),
@@ -115,8 +124,8 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
     k_tid_t appId = k_current_get();
 #ifdef sendDirectAts
-    struct ats *ats_data = ats_get_by_net_if(params->iface);
-    uint8_t schedId = ats_register_stream(ats_data, -1, maxTokenRate, params->maxPacket * 3 / 2);
+    struct ats *ats_data = ats_iface_get_data(params->iface);
+    uint8_t schedId = ats_register_scheduler(ats_data, -1, maxTokenRate, params->maxPacket * 3 / 2);
 #else
     uint8_t schedId = ats_iface_register_stream(params->iface, maxTokenRate, params->maxPacket * 3 / 2);
 #endif
@@ -135,8 +144,8 @@ void sender(void *sender_parameters, void *p2, void *p3)
 #endif
             );
             net_pkt_set_ats_stream(pkts[i], schedId);
-            *(net_pkt_data(pkts[i]) + offset - 14 - 2) = schedId;
-            *(net_pkt_data(pkts[i]) + offset - 14 - 1) = 0;
+            *(pkts[i]->buffer->__buf + offset - 2) = schedId;
+            *(pkts[i]->buffer->__buf + offset - 1) = 0;
         }
 
         i = 0;
@@ -169,7 +178,11 @@ void sender(void *sender_parameters, void *p2, void *p3)
 #endif
             memcpy(pkt->buffer->__buf + offset, &counter, sizeof(uint64_t));
 
+#ifndef nodelay
             k_sleep(K_USEC(params->minIntervalUs));
+#else
+            k_yield();
+#endif
         }
     }
     else

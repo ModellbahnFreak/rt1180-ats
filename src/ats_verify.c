@@ -13,7 +13,7 @@ LOG_MODULE_REGISTER(ats_verify, CONFIG_ATS_VERIFY_LOG_LEVEL);
 
 struct ats_verify_sent_event // 24byte
 {
-    uint64_t timestamp;
+    uint64_t sentTimestamp;
     uint64_t elegibilityTime;
     void *streamId;
     uint16_t packetSize;
@@ -25,7 +25,7 @@ struct ats_verify_stream_t // 32byte
     void *streamId;
     struct ats_verify_iface_t *ats_iface;
     int32_t bucket;
-    uint32_t tokensPerSecond;
+    uint32_t informationRate;
     uint32_t burstSize;
 };
 
@@ -123,12 +123,12 @@ void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegib
     write->streamId = streamId;
     write->packetSize = net_pkt_get_len(pkt);
     write->elegibilityTime = elegibilityTime;
-    ats_time_get(&(write->timestamp));
+    ats_time_get(&(write->sentTimestamp));
 
     uint8_t offset = 14;
     if (net_pkt_ll_proto_type(pkt) == NET_ETH_PTYPE_PTP)
     {
-        net_pkt_set_timestamp_ns(pkt, write->timestamp);
+        net_pkt_set_timestamp_ns(pkt, write->sentTimestamp);
         struct net_ptp_time *t = net_pkt_timestamp(pkt);
         ((uint32_safe_t *)(pkt->buffer->__buf + offset + 34))->val = net_htonl(t->_sec.high);
         ((uint16_safe_t *)(pkt->buffer->__buf + offset + 38))->val = net_htons(t->_sec.low);
@@ -143,11 +143,11 @@ void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegib
     if (write->packetSize >= offset + 32)
     {
         ((uint64_safe_t *)(pkt->buffer->__buf + offset + 16))->val = elegibilityTime;
-        ((uint64_safe_t *)(pkt->buffer->__buf + offset + 24))->val = write->timestamp;
+        ((uint64_safe_t *)(pkt->buffer->__buf + offset + 24))->val = write->sentTimestamp;
     }
 }
 
-void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t tokensPerSecond, uint32_t burstSize)
+void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t informationRate, uint32_t burstSize)
 {
     struct ats_verify_stream_t *stream = NULL;
     bool isNew = false;
@@ -184,7 +184,7 @@ void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t t
 
     stream->streamId = streamId;
     stream->ats_iface->ats_data = ats_data;
-    stream->tokensPerSecond = tokensPerSecond;
+    stream->informationRate = informationRate;
     stream->burstSize = burstSize;
     stream->bucket = burstSize;
 
@@ -235,16 +235,16 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
                 LOG_WRN("A packet with smaller elegibility time %" PRIu64 " was sent after another packet with %" PRIu64 "", evt->elegibilityTime, stream->ats_iface->lastElegibilityTime);
             }
 
-            uint64_t jitter = evt->timestamp - evt->elegibilityTime;
+            uint64_t jitter = evt->sentTimestamp - evt->elegibilityTime;
 
-            uint64_t timeSinceLast = evt->timestamp - stream->lastUpdate;
+            uint64_t timeSinceLast = evt->sentTimestamp - stream->lastUpdate;
             uint32_t rate = (uint64_t)(evt->packetSize) * TIME_NS / timeSinceLast;
 
-            int64_t tokensSinceLast = timeSinceLast * stream->tokensPerSecond / TIME_NS;
+            int64_t tokensSinceLast = timeSinceLast * stream->informationRate / TIME_NS;
             stream->bucket = MIN((stream->bucket + tokensSinceLast), stream->burstSize);
             int32_t newBucket = stream->bucket - (int32_t)evt->packetSize;
 
-            LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %" PRIu64 ", sent at %" PRIu64 ", jitter %" PRIu64 ", bucket: %" PRId32 "=>%" PRId32 ", since last: %" PRIu64 "", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->timestamp, jitter, stream->bucket, newBucket, timeSinceLast);
+            LOG_INF("stream %p sent %d bytes (%d B/s); elegible at %" PRIu64 ", sent at %" PRIu64 ", jitter %" PRIu64 ", bucket: %" PRId32 "=>%" PRId32 ", since last: %" PRIu64 "", evt->streamId, evt->packetSize, rate, evt->elegibilityTime, evt->sentTimestamp, jitter, stream->bucket, newBucket, timeSinceLast);
 
             if (newBucket < 0)
             {
@@ -256,7 +256,7 @@ void ats_verify_thread_entry(void *param1, void *param2, void *param3)
                 stream->bucket = newBucket;
             }
 
-            stream->lastUpdate = evt->timestamp;
+            stream->lastUpdate = evt->sentTimestamp;
             stream->ats_iface->lastElegibilityTime = evt->elegibilityTime;
 
             k_yield();

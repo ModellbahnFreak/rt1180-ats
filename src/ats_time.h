@@ -3,7 +3,7 @@
 
 #include <zephyr/kernel.h>
 
-#define ATS_COUNTER DT_ALIAS(time)
+#define ATS_COUNTER DT_ALIAS(ats_time)
 #define TIME_NS 1000000000LL
 
 #if DT_NODE_HAS_COMPAT(ATS_COUNTER, nxp_imx_gpt)

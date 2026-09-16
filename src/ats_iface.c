@@ -53,18 +53,18 @@ struct ats *ats_iface_get_data(struct net_if *iface)
     return data->ats_data;
 }
 
-uint8_t ats_iface_register_stream_to_group(struct net_if *ats_if, int groupId, uint32_t tokensPerSecond, uint32_t burstSize)
+uint8_t ats_iface_register_stream_to_group(struct net_if *ats_if, int groupId, uint32_t informationRate, uint32_t burstSize)
 {
     struct ats *ats_data = ats_iface_get_data(ats_if);
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(ats_data != NULL, "The interface given to ats_iface_register_stream_to_group was not an ats_iface");
 #endif
-    return ats_register_stream(ats_data, groupId, tokensPerSecond, burstSize);
+    return ats_register_scheduler(ats_data, groupId, informationRate, burstSize);
 }
 
-uint8_t ats_iface_register_stream(struct net_if *ats_if, uint32_t tokensPerSecond, uint32_t burstSize)
+uint8_t ats_iface_register_stream(struct net_if *ats_if, uint32_t informationRate, uint32_t burstSize)
 {
-    return ats_iface_register_stream_to_group(ats_if, -1, tokensPerSecond, burstSize);
+    return ats_iface_register_stream_to_group(ats_if, -1, informationRate, burstSize);
 }
 
 uint8_t ats_iface_stream_get_group(struct net_if *ats_if, uint8_t streamId)
@@ -203,7 +203,16 @@ static int ats_iface_init(const struct device *dev)
 int ats_iface_tx(const struct device *dev, struct net_pkt *pkt)
 {
     struct ats_iface_data *data = dev->data;
-    return ats_send(data->ats_data, pkt->ats_stream, pkt);
+    if (net_pkt_ats_is_scheduled(pkt))
+    {
+        return ats_send(data->ats_data, pkt->ats_stream, pkt);
+    }
+    else
+    {
+        const struct ethernet_api *api = data->ats_data->ifaceDevice->api;
+        net_pkt_set_iface(pkt, data->ats_data->iface);
+        return api->send(data->ats_data->ifaceDevice, pkt);
+    }
 }
 
 enum ethernet_hw_caps ats_iface_get_capabilities(const struct device *dev)

@@ -111,16 +111,16 @@ uint8_t ats_get_group_id(struct ats *ats_data, uint8_t schedId)
     return ats_data->scheduler[schedId].schedulerGroup;
 }
 
-uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPerSecond, uint32_t burstSize)
+uint8_t ats_register_scheduler(struct ats *ats_data, int groupId, uint32_t informationRate, uint32_t burstSize)
 {
     __ASSERT(ats_data != NULL, "no ats structure passed");
     __ASSERT(groupId < CONFIG_ATS_GROUP_INSTANCES, "invalid ATS group id %d, out of range of %d available groups", groupId, CONFIG_ATS_GROUP_INSTANCES);
-    __ASSERT(tokensPerSecond > 0, "committed information rate (CIR, tokensPreSecond) must be greater than 0!");
+    __ASSERT(informationRate > 0, "committed information rate (CIR, informationRate) must be greater than 0!");
     __ASSERT(burstSize > 0, "committed burst size (CBS, burstSize) must be greater than 0!");
     int schedulerId = -1;
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
-        if (ats_data->scheduler[i].tokensPerSecond == 0)
+        if (ats_data->scheduler[i].informationRate == 0)
         {
             schedulerId = i;
             break;
@@ -129,7 +129,7 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     __ASSERT(schedulerId >= 0, "no free ATS scheduler found for iface %s", net_if_get_config(ats_data->iface)->name);
 
     LOG_INF("Registered ATS stream %d for iface %s", schedulerId, net_if_get_config(ats_data->iface)->name);
-    LOG_DBG("using groupId %d, %d tokens/sec, %d bytes burst size", groupId, tokensPerSecond, burstSize);
+    LOG_DBG("using groupId %d, %d tokens/sec, %d bytes burst size", groupId, informationRate, burstSize);
     if (groupId < 0)
     {
         groupId = -1;
@@ -145,19 +145,18 @@ uint8_t ats_register_stream(struct ats *ats_data, int groupId, uint32_t tokensPe
     }
 
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_set_stream_parameters(&(ats_data->group[groupId]), ats_data, tokensPerSecond, burstSize);
+    ats_verify_set_stream_parameters(&(ats_data->group[groupId]), ats_data, informationRate, burstSize);
 #endif
 
     ats_data->scheduler[schedulerId].bucketEmptyTimeTicks = 0;
-    ats_data->scheduler[schedulerId].tokensPerSecond = tokensPerSecond;
+    ats_data->scheduler[schedulerId].informationRate = informationRate;
     ats_data->scheduler[schedulerId].burstSize = burstSize;
     ats_data->scheduler[schedulerId].schedulerGroup = groupId;
-    ats_data->scheduler[schedulerId].emptyToFullTimeTicks = ((uint64_t)burstSize * (uint64_t)TICKS_PER_SECOND) / tokensPerSecond;
+    ats_data->scheduler[schedulerId].emptyToFullTimeTicks = ((uint64_t)burstSize * (uint64_t)TICKS_PER_SECOND) / informationRate;
 
     return schedulerId;
 }
 
-extern int netc_eth_tx(const struct device *dev, struct net_pkt *pkt);
 int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #ifdef CONFIG_ATS_VERIFY_ENABLED
                    ,
@@ -171,7 +170,8 @@ int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #ifdef CONFIG_ATS_VERIFY_ENABLED
     ats_verify_packet_sent(group, pkt, elegibilityTime);
 #endif
-    int res = netc_eth_tx(group->parent->ifaceDevice, pkt);
+    const struct ethernet_api *api = group->parent->ifaceDevice->api;
+    int res = api->send(group->parent->ifaceDevice, pkt);
     net_pkt_unref(pkt);
     return res;
 }
@@ -235,7 +235,7 @@ ats_time_t ats_calc_elegibility_time(struct ats *ats_data, uint8_t schedId, size
 {
     struct ats_scheduler *sched = &(ats_data->scheduler[schedId]);
     struct ats_group *group = &(ats_data->group[sched->schedulerGroup]);
-    uint64_t pktRecoveryTimeTicks = ((uint64_t)pktSize) * TICKS_PER_SECOND / sched->tokensPerSecond;
+    uint64_t pktRecoveryTimeTicks = ((uint64_t)pktSize) * TICKS_PER_SECOND / sched->informationRate;
 
     uint64_t schedulerElegebilityTimeTicks = sched->bucketEmptyTimeTicks + pktRecoveryTimeTicks;
     ats_time_t elegebilityTime = {
@@ -368,6 +368,7 @@ void ats_counter_alarm_cb(uint64_t ticks)
     ats_time_t nextElegibilityTime = {.valid = false};
     do
     {
+        nextElegibilityTime.valid = false;
         STRUCT_SECTION_FOREACH(ats, ats_data)
         {
             for (uint8_t i = 0; i < CONFIG_ATS_GROUP_INSTANCES; i++)
@@ -401,7 +402,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
     __ASSERT(net_pkt_lladdr_dst(pkt)->len > 0, "packet to be sent via ATS isn't ethernet processed yet! Use upper layers of network stack.");
     __ASSERT(schedId < CONFIG_ATS_SCHEDULER_INSTANCES, "invalid scheduler id %d out of range (%d)", schedId, CONFIG_ATS_SCHEDULER_INSTANCES);
-    __ASSERT(ats_data->scheduler[schedId].tokensPerSecond > 0, "ATS instance %d not registered/initialized", schedId);
+    __ASSERT(ats_data->scheduler[schedId].informationRate > 0, "ATS instance %d not registered/initialized", schedId);
     __ASSERT(pktSize <= ats_data->scheduler[schedId].burstSize, "packet size %d exeeds burst size %d of ATS %d", pktSize, ats_data->scheduler[schedId].burstSize, schedId);
 #endif
 
@@ -409,11 +410,11 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     struct k_msgq *queue = &(ats_data->group[groupId].queue);
     uint64_t newBucketEmptyTime;
 
-    k_mutex_lock(&(ats_data->group[groupId].elegibilityTimeMutex), K_FOREVER);
+    // k_mutex_lock(&(ats_data->group[groupId].elegibilityTimeMutex), K_FOREVER);
     ats_time_t elegibilityTime = ats_calc_elegibility_time(ats_data, schedId, pktSize, now, &newBucketEmptyTime);
     if (!elegibilityTime.valid)
     {
-        k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
+        // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
         LOG_WRN("group %d packet elegibility time (%" PRId64 ") more than %" PRId64 " ticks after now (%" PRId64 ") => longer than absolut maximum residence. Dropping packet from scheduler %d", groupId, elegibilityTime.tick, TICK_MAX_INTERVAL, now, schedId);
         return -1; // todo: proper error codes
     }
@@ -421,18 +422,18 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         {
             .packet = pkt,
             .elegibilityTime = TICK_NORMALIZE(elegibilityTime.tick),
-        };
+    };
 
     if (k_msgq_put(queue, &packet, K_NO_WAIT) != 0)
     {
         // packet queue full, can't process packet (even if it were immediately elegible)
-        k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
-        LOG_WRN("group %d packet queue is full (%d packets). Dropping packet from scheduler %d", groupId, CONFIG_ATS_QUEUE_LENGTH, schedId);
+        // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
+        LOG_INF("group %d packet queue is full (%d packets). Dropping packet from scheduler %d", groupId, CONFIG_ATS_QUEUE_LENGTH, schedId);
         return -1; // todo: proper error codes
     }
     ats_data->scheduler[schedId].bucketEmptyTimeTicks = newBucketEmptyTime;
     ats_data->group[groupId].groupElegibilityTimeTicks = elegibilityTime.tick;
-    k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
+    // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
 
 #ifdef CONFIG_ATS_VERIFY_ENABLED
     ats_verify_packet_enqueued(&(ats_data->group[groupId]), pkt, now);
@@ -454,17 +455,17 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     ats_data->group[groupId].queueHeadElegibilityTime.valid = true;
 
     // packet isn't elegible yet and queue was empty => check if timer need updating
-    k_sched_lock();
+    unsigned int lockI = irq_lock();
     int updateRes = ats_update_counter_alarm(packet.elegibilityTime, false, &now);
-    k_sched_unlock();
+    irq_unlock(lockI);
     if (updateRes == RETURN_PROCESS_NOW)
     {
         uint8_t numRemaining = ats_process_queue(&(ats_data->group[groupId]), now);
         if (numRemaining > 0)
         {
-            k_sched_lock();
+            lockI = irq_lock();
             updateRes = ats_update_counter_alarm(ats_data->group[groupId].queueHeadElegibilityTime.tick, false, &now);
-            k_sched_unlock();
+            irq_unlock(lockI);
         }
     }
     // LOG_DBG("group %p, timer set for %" PRId64 " ns, no timer running before", groupId, timeUntilElegible);

@@ -2,15 +2,15 @@
 
 / {
 	aliases {
-		lan = &enetc_psi0;
+		lan = &switch_port3;
 		eth0 = &switch_port0;
 		eth1 = &switch_port1;
 		eth2 = &switch_port2;
 		eth3 = &switch_port3;
 		eth4 = &enetc_psi0;
 		ethpseudo = &enetc_psi1;
-		time = &netc_ptp_clock0;
-		//time = &gpt1;
+		ats-time = &netc_ptp_clock0;
+		//ats-time = &gpt1;
 
 		ats = &ats_0;
 	};
