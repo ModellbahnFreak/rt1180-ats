@@ -6,7 +6,11 @@
 #include <zephyr/net/dsa_core.h>
 #include "ats_time.h"
 
+#ifdef CONFIG_ATS_LOG_LEVEL
 LOG_MODULE_REGISTER(speedtest, CONFIG_ATS_LOG_LEVEL);
+#else
+LOG_MODULE_REGISTER(speedtest);
+#endif
 
 #define STACK_SIZE 1024
 #define NUM_STEPS 3

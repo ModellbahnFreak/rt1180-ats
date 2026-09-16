@@ -12,6 +12,10 @@ extern uint64_t speedtest_send_timestamps[];
 
 k_tid_t speedtest_start(struct net_if *iface, uint8_t prio, bool useZephyrStack);
 
+#else
+
+#define speedtest_start(...) NULL
+
 #endif
 
 #endif
