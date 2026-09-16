@@ -22,6 +22,7 @@ var (
 	filterColumn string  = ""
 	filterRegex  string  = ""
 	ignore0      bool    = true
+	valueFactor  float64 = 1
 )
 
 func init() {
@@ -33,6 +34,7 @@ func init() {
 	flag.StringVar(&filterColumn, "filterColumn", filterColumn, "Column to filter for. Empty to disable filtering")
 	flag.StringVar(&filterRegex, "filterRegex", filterRegex, "Regex the filter column must match")
 	flag.BoolVar(&ignore0, "ignore0", ignore0, "If flag is set, all 0 values in the value column will be ignored")
+	flag.Float64Var(&valueFactor, "factor", valueFactor, "A factor to apply to all values before histogram calculation")
 }
 
 func main() {
@@ -81,17 +83,17 @@ func readValues() (valuesOrdered []float64) {
 			filterColumn = strings.ToLower(strings.TrimSpace(filterColumn))
 			for i, c := range line {
 				c = strings.ToLower(strings.TrimSpace(c))
-				switch c {
-				case column:
+				if c == column {
 					histColIndex = i
-				case filterColumn:
+				}
+				if c == filterColumn {
 					filterColIndex = i
 				}
 			}
 			if histColIndex == -1 {
 				log.Fatalf("Could not find column %s", column)
 			} else if filterColIndex == -1 {
-				log.Fatalf("Could not find column %s", filterColumn)
+				log.Fatalf("Could not find filter column %s", filterColumn)
 			} else {
 				log.Printf("Using column index %d and filtering by %d", histColIndex, filterColIndex)
 			}
@@ -109,7 +111,7 @@ func readValues() (valuesOrdered []float64) {
 				log.Printf("Column %d of line %v could not be parsed as float64: %v", histColIndex, line, err)
 			} else {
 				if !ignore0 || val != 0 {
-					valuesOrdered = append(valuesOrdered, val)
+					valuesOrdered = append(valuesOrdered, val*valueFactor)
 				}
 			}
 		}

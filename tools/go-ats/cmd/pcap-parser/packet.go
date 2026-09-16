@@ -20,6 +20,7 @@ type packetTimings struct {
 }
 
 var packetsWithoutHwTime map[uint16]map[uint64]*packetTimings = make(map[uint16]map[uint64]*packetTimings, 5)
+var numHwErrors = 0
 
 func (t packetTimings) ToCsv() []string {
 	delta := t.transmission - t.eligibility
@@ -92,7 +93,10 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packetTi
 			packetsWithoutHwTime[p.stream] = thisStreamMap
 		}
 		if len(thisStreamMap) >= 50 {
-			log.Printf("Currently storing %d packets for stream %d without hw timestamp. Clearing to make space", len(thisStreamMap), p.stream)
+			if numHwErrors < 100 {
+				log.Printf("Currently storing %d packets for stream %d without hw timestamp. Clearing to make space", len(thisStreamMap), p.stream)
+			}
+			numHwErrors++
 			res = append(res, flushPackets(int(p.stream))...)
 		}
 		thisStreamMap[p.i] = p
