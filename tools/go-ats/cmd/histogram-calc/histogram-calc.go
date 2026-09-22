@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,7 +24,7 @@ var (
 	ignore0      bool    = true
 	write0       bool    = false
 	valueFactor  float64 = 1
-	blockSize    int     = 500000
+	blockSize    int     = -2
 	calcBoxplot  bool    = true
 )
 
@@ -40,7 +39,7 @@ func init() {
 	flag.BoolVar(&ignore0, "ignore0", ignore0, "If flag is set, all 0 values in the value column will be ignored")
 	flag.BoolVar(&write0, "write0", write0, "If flag is set, empty bucktes will be written to the output, else they will be left out")
 	flag.Float64Var(&valueFactor, "factor", valueFactor, "A factor to apply to all values before histogram calculation")
-	flag.IntVar(&blockSize, "block", blockSize, "Number of lines to process at a time. <= 0 processes all lines at once (!RAM!)")
+	flag.IntVar(&blockSize, "block", blockSize, "Number of lines to process at a time. -1 processes all lines at once (!RAM!)")
 	flag.BoolVar(&calcBoxplot, "boxplot", calcBoxplot, "Set this flag to false to disable boxplot calculation (Needs whole dataset in ram)")
 }
 
@@ -71,6 +70,19 @@ func main() {
 	var boxPlot *BoxPlot
 	var values []float64
 
+	var reader DataInput
+	if strings.HasSuffix(strings.ToLower(in), ".db") {
+		reader = DataInput_Sqlite(in, column, filterColumn, filterRegex)
+		if blockSize < -1 {
+			blockSize = -1
+		}
+	} else {
+		reader = DataInput_Csv(in, column, filterColumn, filterRegex)
+		if blockSize < -1 {
+			blockSize = 500000
+		}
+	}
+
 	if blockSize > 0 {
 		valCh := make([]chan []float64, 0, 2)
 		valCh = append(valCh, make(chan []float64))
@@ -84,11 +96,11 @@ func main() {
 			valCh = append(valCh, make(chan []float64))
 			wg.Go(func() {
 				for v := range valCh[1] {
-					boxPlot, values = updateBoxPlot(v, values, boxPlot)
+					boxPlot, values = updateBoxPlot(v, values, boxPlot, false)
 				}
 			})
 		}
-		readValues(blockSize, valCh)
+		reader.ReadBlocks(blockSize, valCh)
 		wg.Wait()
 		log.Println("Writing output")
 		if boxPlot == nil {
@@ -97,101 +109,22 @@ func main() {
 			writeHistogram(hist, boxPlot.ToFloats()...)
 		}
 	} else {
-		values := readValues(blockSize, nil)
+		var values []float64
+		var ordered bool = false
+		if sqlR, is := reader.(*sqliteInput); is {
+			values = sqlR.ReadOrdered()
+			ordered = true
+		} else {
+			values = reader.ReadAll()
+		}
 		hist, _ := updateHistogram(values, nil)
 		if calcBoxplot {
-			boxplot, _ := updateBoxPlot(values, nil, nil)
+			boxplot, _ := updateBoxPlot(values, nil, nil, ordered)
 			writeHistogram(hist, boxplot.ToFloats()...)
 		} else {
 			writeHistogram(hist)
 		}
 	}
-}
-
-func readValues(blockSize int, valChan []chan []float64) (valuesOrdered []float64) {
-	f, err := os.Open(in)
-	if err != nil {
-		log.Fatalln("Could not open input: ", err)
-	}
-	defer f.Close()
-
-	csvIn := csv.NewReader(f)
-	var line []string
-	var histColIndex int = -1
-	var filterColIndex int = -1
-
-	var numFiltered = 0
-	valuesOrdered = make([]float64, 0)
-
-	if parsedCol, err := strconv.ParseUint(column, 0, 32); err == nil {
-		histColIndex = int(parsedCol)
-	}
-	if filterColumn == "" {
-		filterColIndex = -2
-	} else if parsedCol, err := strconv.ParseUint(filterColumn, 0, 32); err == nil {
-		filterColIndex = int(parsedCol)
-	}
-
-	for line, err = csvIn.Read(); err == nil; line, err = csvIn.Read() {
-		if len(line) == 0 {
-			continue
-		}
-		if trimed := strings.TrimSpace(line[0]); (len(line) == 1 && len(trimed) == 0) || strings.HasPrefix(trimed, "#") {
-			continue
-		}
-
-		if histColIndex == -1 || filterColIndex == -1 {
-			column = strings.ToLower(strings.TrimSpace(column))
-			filterColumn = strings.ToLower(strings.TrimSpace(filterColumn))
-			for i, c := range line {
-				c = strings.ToLower(strings.TrimSpace(c))
-				if c == column {
-					histColIndex = i
-				}
-				if c == filterColumn {
-					filterColIndex = i
-				}
-			}
-			if histColIndex == -1 {
-				log.Fatalf("Could not find column %s", column)
-			} else if filterColIndex == -1 {
-				log.Fatalf("Could not find filter column %s", filterColumn)
-			} else {
-				log.Printf("Using column index %d and filtering by %d", histColIndex, filterColIndex)
-			}
-		} else if len(line) > histColIndex {
-			if filterColIndex >= 0 {
-				if match, err := regexp.MatchString(filterRegex, line[filterColIndex]); !match {
-					if err != nil {
-						log.Printf("Regex error: %v", err)
-					}
-					numFiltered++
-					continue
-				}
-			}
-			if val, err := strconv.ParseFloat(line[histColIndex], 64); err != nil {
-				log.Printf("Column %d of line %v could not be parsed as float64: %v", histColIndex, line, err)
-			} else {
-				if !ignore0 || val != 0 {
-					valuesOrdered = append(valuesOrdered, val*valueFactor)
-					if blockSize > 0 && len(valuesOrdered) >= blockSize {
-						for i := range valChan {
-							valChan[i] <- valuesOrdered
-						}
-						valuesOrdered = make([]float64, 0)
-					}
-				}
-			}
-		}
-	}
-	if blockSize > 0 {
-		for i := range valChan {
-			valChan[i] <- valuesOrdered
-			close(valChan[i])
-		}
-	}
-	log.Printf("Ended reading input due to %v. Processed %d rows, Filtered out %d rows", err, len(valuesOrdered), numFiltered)
-	return
 }
 
 func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Histogram, countTotal uint64) {
@@ -221,7 +154,7 @@ func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Hist
 	return histBuckets, countTotal
 }
 
-func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot) (boxPlot *BoxPlot, values []float64) {
+func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot, isSorted bool) (boxPlot *BoxPlot, values []float64) {
 
 	boxPlot = oldBoxPlot
 	if len(newValues) == 0 {
@@ -274,7 +207,7 @@ func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot
 }
 
 func writeHistogram(histBuckets *Histogram, addData ...float64) {
-	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_hist" + path.Ext(in)
+	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_hist.csv"
 	f, err := os.Create(newFileName)
 	if err != nil {
 		log.Fatalf("Could not open output file %s: %v", newFileName, err)

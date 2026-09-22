@@ -2,7 +2,6 @@ package main
 
 import (
 	"compress/gzip"
-	"encoding/csv"
 	"flag"
 	"io"
 	"io/fs"
@@ -28,7 +27,6 @@ var (
 const SPEED_EXCLUSIVE = false // set true to only produce speed result if -speed is set
 
 var knownFileSizes map[string]int64 = make(map[string]int64)
-var outCsv *csv.Writer = nil
 var speed *speed_analyzer
 
 func init() {
@@ -53,44 +51,35 @@ func main() {
 		}
 	}
 
-	outF, err := os.OpenFile(outFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, os.ModePerm)
-	if err != nil {
-		log.Fatalln("Could not open output file: ", err)
+	var out DataOutput
+	if strings.HasSuffix(outFile, ".db") {
+		out = DataOutput_Sqlite(outFile)
+	} else {
+		out = DataOutput_Csv(outFile)
 	}
-	defer outF.Close()
-	outCsv = csv.NewWriter(outF)
-	if outCsv == nil {
-		log.Fatalln("Csv writer could not be inititlized")
-	}
-	outInfo, err := outF.Stat()
-	if err != nil {
-		log.Printf("Not adding header to output csv file as existing size could not be determined")
-	} else if outInfo.Size() <= 0 {
-		outCsv.Write([]string{"Stream", "Index", "Enqueue", "Eligibility", "Transmission", "HwTransmission", "t-e", "hwT-e", "Arrival"})
-		outCsv.Flush()
-	}
+	defer out.Close()
 
 	defer func() {
 		packets := flushPackets(-1)
 		for _, p := range packets {
-			outCsv.Write(p.ToCsv())
+			out.WritePacket(p)
 		}
 	}()
 
 	if calculateSpeed > 0 {
-		speed = speed_analyzer_new(outFile, calculateSpeed)
+		speed = speed_analyzer_new(out, calculateSpeed)
 		defer speed.speed_analyzer_close()
 	}
 
 	if len(inFile) > 0 {
-		processPcapFile(inFile)
+		processPcapFile(inFile, out)
 	} else {
 		t := time.NewTicker(1 * time.Second)
 		for range t.C {
 			log.Println("Reading folder")
 			files := findAllPcapFiles(false)
 			for _, f := range files {
-				processPcapFile(path.Join(folderPath, f))
+				processPcapFile(path.Join(folderPath, f), out)
 				knownFileSizes[f] = -1
 			}
 			if !waitForNextFile && !ignoreInitialFiles {
@@ -100,7 +89,7 @@ func main() {
 	}
 }
 
-func processPcapFile(f string) {
+func processPcapFile(f string, out DataOutput) {
 	log.Printf("Processing %s", f)
 	var reader io.Reader
 	fRead, err := os.Open(f)
@@ -126,7 +115,7 @@ func processPcapFile(f string) {
 			log.Fatalf("Could not read pcapng file %s: %v", f, err)
 		}
 
-		defer outCsv.Flush()
+		defer out.Flush()
 		for i := 0; ; i++ {
 			data, info, err := capRead.ZeroCopyReadPacketData()
 			if err != nil {
@@ -139,7 +128,7 @@ func processPcapFile(f string) {
 			if !SPEED_EXCLUSIVE || speed == nil {
 				packets := parsePacket(i, data, info)
 				for _, p := range packets {
-					outCsv.Write(p.ToCsv())
+					out.WritePacket(p)
 				}
 			}
 			if speed != nil {

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/google/gopacket"
@@ -22,17 +21,15 @@ type packetTimings struct {
 var packetsWithoutHwTime map[uint16]map[uint64]*packetTimings = make(map[uint16]map[uint64]*packetTimings, 5)
 var numHwErrors = 0
 
-func (t packetTimings) ToCsv() []string {
-	delta := t.transmission - t.eligibility
-	var hwDelta time.Duration
+func (t packetTimings) DeltaET() time.Duration {
+	return t.transmission - t.eligibility
+}
+
+func (t packetTimings) DeltaEHw() time.Duration {
 	if t.hwTransmission > 0 {
-		hwDelta = t.hwTransmission - t.eligibility
+		return t.hwTransmission - t.eligibility
 	}
-	return []string{
-		strconv.FormatUint(uint64(t.stream), 10), strconv.FormatUint(uint64(t.i), 10),
-		strconv.FormatUint(uint64(t.enqueue), 10), strconv.FormatUint(uint64(t.eligibility), 10), strconv.FormatUint(uint64(t.transmission), 10), strconv.FormatUint(uint64(t.hwTransmission), 10),
-		strconv.FormatInt(int64(delta), 10), strconv.FormatInt(int64(hwDelta), 10),
-		strconv.FormatUint(uint64(t.arrival.UnixNano()), 10)}
+	return 0
 }
 
 func flushPackets(streamId int) (res []*packetTimings) {
