@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go-ats/packet"
 	"math"
 	"time"
 
@@ -8,21 +9,14 @@ import (
 )
 
 type speed_analyzer struct {
-	out               DataOutput
+	out               packet.DataOutput
 	nextIntervalStart time.Time
 	thisIntervalBytes uint64
 	bucketSize        time.Duration
 	lastI             int
 }
 
-type speedData struct {
-	intervalStart time.Time
-	numBytes      uint64
-	numBits       uint64
-	avgSpeed      float64
-}
-
-func speed_analyzer_new(outFile DataOutput, bucketSizeMs int) *speed_analyzer {
+func speed_analyzer_new(outFile packet.DataOutput, bucketSizeMs int) *speed_analyzer {
 	s := &speed_analyzer{
 		out:        outFile,
 		bucketSize: time.Duration(bucketSizeMs) * time.Millisecond,
@@ -35,12 +29,12 @@ func (s *speed_analyzer) speed_analyzer_addPacket(i int, data []byte, info gopac
 		if info.Timestamp.Sub(s.nextIntervalStart) > 5*time.Second {
 			start := s.nextIntervalStart
 			if !s.nextIntervalStart.IsZero() {
-				s.out.WriteSpeed(&speedData{intervalStart: start, numBytes: s.thisIntervalBytes, numBits: 0, avgSpeed: math.NaN()})
+				s.out.WriteSpeed(&packet.SpeedData{IntervalStart: start, NumBytes: s.thisIntervalBytes, NumBits: 0, AvgSpeed: math.NaN()})
 			}
 			s.nextIntervalStart = info.Timestamp
 		} else {
 			numBits := s.thisIntervalBytes * 8
-			s.out.WriteSpeed(&speedData{intervalStart: s.nextIntervalStart, numBytes: s.thisIntervalBytes, numBits: numBits, avgSpeed: float64(numBits) / (float64(s.bucketSize) / float64(time.Second))})
+			s.out.WriteSpeed(&packet.SpeedData{IntervalStart: s.nextIntervalStart, NumBytes: s.thisIntervalBytes, NumBits: numBits, AvgSpeed: float64(numBits) / (float64(s.bucketSize) / float64(time.Second))})
 			s.nextIntervalStart = s.nextIntervalStart.Add(s.bucketSize)
 		}
 		s.out.Flush()

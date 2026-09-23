@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/csv"
 	"flag"
+	"fmt"
+	"go-ats/packet"
 	"log"
 	"math"
 	"os"
@@ -26,6 +28,9 @@ var (
 	valueFactor  float64 = 1
 	blockSize    int     = -2
 	calcBoxplot  bool    = true
+	roundTo      int     = -400
+	normalize    bool    = false
+	logarithmic  bool    = false
 )
 
 func init() {
@@ -41,16 +46,18 @@ func init() {
 	flag.Float64Var(&valueFactor, "factor", valueFactor, "A factor to apply to all values before histogram calculation")
 	flag.IntVar(&blockSize, "block", blockSize, "Number of lines to process at a time. -1 processes all lines at once (!RAM!)")
 	flag.BoolVar(&calcBoxplot, "boxplot", calcBoxplot, "Set this flag to false to disable boxplot calculation (Needs whole dataset in ram)")
+	flag.IntVar(&roundTo, "round", roundTo, "number of decimal digits to round to (neg before the decimal point); after factor")
+	flag.BoolVar(&normalize, "normalize", normalize, "Set this flag to normalize hostogram to 1=max count")
+	flag.BoolVar(&logarithmic, "log", logarithmic, "Set this flag to calculate log of values")
 }
 
 type BoxPlot struct {
-	minimum,
 	lowerW,
 	quartile1,
 	median,
 	quartile3,
-	upperW,
-	maximum float64
+	upperW float64
+	outliers map[float64]bool
 }
 
 type Histogram struct {
@@ -59,8 +66,19 @@ type Histogram struct {
 	maxBucket int
 }
 
-func (b BoxPlot) ToFloats() []float64 {
-	return []float64{b.minimum, b.lowerW, b.quartile1, b.median, b.quartile3, b.upperW, b.maximum}
+func (b BoxPlot) ToFloats() (res []float64) {
+	res = make([]float64, len(b.outliers)+5)
+	res[0] = b.lowerW
+	res[1] = b.quartile1
+	res[2] = b.median
+	res[3] = b.quartile3
+	res[4] = b.upperW
+	i := 5
+	for v := range b.outliers {
+		res[i] = v
+		i++
+	}
+	return
 }
 
 func main() {
@@ -70,14 +88,14 @@ func main() {
 	var boxPlot *BoxPlot
 	var values []float64
 
-	var reader DataInput
+	var reader packet.DataInput
 	if strings.HasSuffix(strings.ToLower(in), ".db") {
-		reader = DataInput_Sqlite(in, column, filterColumn, filterRegex)
+		reader = packet.DataInput_Sqlite(in, column, filterColumn, filterRegex, ignore0, valueFactor, roundTo)
 		if blockSize < -1 {
 			blockSize = -1
 		}
 	} else {
-		reader = DataInput_Csv(in, column, filterColumn, filterRegex)
+		reader = packet.DataInput_Csv(in, column, filterColumn, filterRegex, ignore0, valueFactor, roundTo)
 		if blockSize < -1 {
 			blockSize = 500000
 		}
@@ -102,25 +120,35 @@ func main() {
 		}
 		reader.ReadBlocks(blockSize, valCh)
 		wg.Wait()
+		if normalize || logarithmic {
+			log.Println("Normalizing")
+			normalizeHistogram(hist, normalize, logarithmic)
+		}
 		log.Println("Writing output")
 		if boxPlot == nil {
 			writeHistogram(hist)
 		} else {
 			writeHistogram(hist, boxPlot.ToFloats()...)
+			writeBoxplotTex(boxPlot)
 		}
 	} else {
 		var values []float64
 		var ordered bool = false
-		if sqlR, is := reader.(*sqliteInput); is {
+		if sqlR, is := reader.(*packet.SqliteInput); is && calcBoxplot {
 			values = sqlR.ReadOrdered()
 			ordered = true
 		} else {
 			values = reader.ReadAll()
 		}
 		hist, _ := updateHistogram(values, nil)
+		if normalize || logarithmic {
+			log.Println("Normalizing")
+			normalizeHistogram(hist, normalize, logarithmic)
+		}
 		if calcBoxplot {
-			boxplot, _ := updateBoxPlot(values, nil, nil, ordered)
-			writeHistogram(hist, boxplot.ToFloats()...)
+			boxPlot, _ = updateBoxPlot(values, nil, nil, ordered)
+			writeHistogram(hist, boxPlot.ToFloats()...)
+			writeBoxplotTex(boxPlot)
 		} else {
 			writeHistogram(hist)
 		}
@@ -154,6 +182,27 @@ func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Hist
 	return histBuckets, countTotal
 }
 
+func normalizeHistogram(hist *Histogram, normalize, logarithmic bool) {
+	if normalize {
+		var maxCount float64 = -1
+		for _, c := range hist.data {
+			if c > maxCount {
+				maxCount = c
+			}
+		}
+		for i, c := range hist.data {
+			hist.data[i] = c / maxCount
+		}
+	}
+	if logarithmic {
+		for i, c := range hist.data {
+			if c > 0 {
+				hist.data[i] = math.Log10(c)
+			}
+		}
+	}
+}
+
 func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot, isSorted bool) (boxPlot *BoxPlot, values []float64) {
 
 	boxPlot = oldBoxPlot
@@ -169,19 +218,18 @@ func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot
 		log.Printf("Sorting initial %d values", len(newValues))
 		values = make([]float64, len(newValues))
 		copy(values, newValues)
-		slices.Sort(values)
 	} else {
 		log.Printf("Adding %d values to existing %d values", len(newValues), len(oldValues))
 		values = make([]float64, len(oldValues)+len(newValues))
 		copy(values, oldValues)
 		copy(values[len(oldValues):], newValues)
+	}
+	if !isSorted {
 		slices.Sort(values)
 	}
 
 	len := len(values)
 
-	boxPlot.minimum = values[0]
-	boxPlot.maximum = values[len-1]
 	if len%2 == 0 {
 		boxPlot.median = (values[len/2-1] + values[len/2]) * 0.5
 	} else {
@@ -195,14 +243,26 @@ func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot
 		boxPlot.quartile3 = values[len*3/4]
 	}
 	irq := boxPlot.quartile3 - boxPlot.quartile1
-	var i int
-	for i = 0; i < len && values[i] <= (boxPlot.quartile1-1.5*irq); i++ {
+	var lowerWPos, upperWPos int
+	for lowerWPos = 0; lowerWPos < len && values[lowerWPos] < (boxPlot.quartile1-1.5*irq); lowerWPos++ {
 	}
-	boxPlot.lowerW = values[min(i, len-1)]
-	for i = 0; i < len && values[i] < (boxPlot.quartile1+1.5*irq); i++ {
+	lowerWPos = min(lowerWPos, len-1)
+	boxPlot.lowerW = values[lowerWPos]
+	for upperWPos = 0; upperWPos < len && values[upperWPos] <= (boxPlot.quartile3+1.5*irq); upperWPos++ {
 	}
-	boxPlot.upperW = values[min(i-1, len-1)]
-	log.Printf("Min: %f, lowerW: %f, 0.25: %f, median: %f, 0.75: %f, upperW: %f max: %f", boxPlot.minimum, boxPlot.lowerW, boxPlot.quartile1, boxPlot.median, boxPlot.quartile3, boxPlot.upperW, boxPlot.maximum)
+	upperWPos = min(upperWPos-1, len-1)
+	boxPlot.upperW = values[upperWPos]
+	if boxPlot.outliers == nil {
+		boxPlot.outliers = make(map[float64]bool, lowerWPos+(len-upperWPos-1))
+	} else {
+		clear(boxPlot.outliers)
+	}
+	for i := 0; i < len; i++ {
+		if i < lowerWPos || i > upperWPos {
+			boxPlot.outliers[values[i]] = true
+		}
+	}
+	log.Printf("lowerW: %f, 0.25: %f, median: %f, 0.75: %f, upperW: %f, outliers: %+v", boxPlot.lowerW, boxPlot.quartile1, boxPlot.median, boxPlot.quartile3, boxPlot.upperW, boxPlot.outliers)
 	return
 }
 
@@ -228,7 +288,31 @@ func writeHistogram(histBuckets *Histogram, addData ...float64) {
 			if !has {
 				val = 0
 			}
-			csvOut.Write([]string{strconv.FormatFloat(bucketStart, 'f', -1, 64), strconv.FormatFloat(bucketStart+binSize, 'f', -1, 64), strconv.FormatInt(int64(val), 10)})
+			csvOut.Write([]string{strconv.FormatFloat(bucketStart, 'f', -1, 64), strconv.FormatFloat(bucketStart+binSize, 'f', -1, 64), strconv.FormatFloat(val, 'f', -1, 64)})
 		}
 	}
+}
+
+func writeBoxplotTex(boxplot *BoxPlot) {
+	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_boxpl.tex"
+	f, err := os.Create(newFileName)
+	if err != nil {
+		log.Fatalf("Could not open output file %s: %v", newFileName, err)
+	}
+	defer f.Close()
+
+	outliersStr := ""
+	for v := range boxplot.outliers {
+		outliersStr += strconv.FormatFloat(v, 'f', -1, 64) + "\\\\"
+	}
+	f.WriteString(fmt.Sprintf(`\addplot+ [
+	boxplot prepared={
+			lower whisker=%f,
+			lower quartile=%f,
+			median=%f,
+			upper quartile=%f,
+			upper whisker=%f,
+		},
+]
+table [row sep=\\,y index=0] {%s};`, boxplot.lowerW, boxplot.quartile1, boxplot.median, boxplot.quartile3, boxplot.upperW, outliersStr))
 }

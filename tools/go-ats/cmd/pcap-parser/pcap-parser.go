@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"flag"
+	"go-ats/packet"
 	"io"
 	"io/fs"
 	"log"
@@ -51,13 +52,19 @@ func main() {
 		}
 	}
 
-	var out DataOutput
+	var out packet.DataOutput
 	if strings.HasSuffix(outFile, ".db") {
-		out = DataOutput_Sqlite(outFile)
+		out = packet.DataOutput_Sqlite(outFile)
 	} else {
-		out = DataOutput_Csv(outFile)
+		out = packet.DataOutput_Csv(outFile)
 	}
 	defer out.Close()
+	if sqlO, is := out.(*packet.SqliteOutput); is {
+		defer func() {
+			sqlO.Flush()
+			sqlO.AddNumbers()
+		}()
+	}
 
 	defer func() {
 		packets := flushPackets(-1)
@@ -89,7 +96,7 @@ func main() {
 	}
 }
 
-func processPcapFile(f string, out DataOutput) {
+func processPcapFile(f string, out packet.DataOutput) {
 	log.Printf("Processing %s", f)
 	var reader io.Reader
 	fRead, err := os.Open(f)
@@ -116,6 +123,7 @@ func processPcapFile(f string, out DataOutput) {
 		}
 
 		defer out.Flush()
+		defer packetMissingReport()
 		for i := 0; ; i++ {
 			data, info, err := capRead.ZeroCopyReadPacketData()
 			if err != nil {
