@@ -64,6 +64,9 @@ type Histogram struct {
 	data      map[int]float64
 	minBucket int
 	maxBucket int
+	total     int
+	mean,
+	variance float64
 }
 
 func (b BoxPlot) ToFloats() (res []float64) {
@@ -107,7 +110,7 @@ func main() {
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			for v := range valCh[0] {
-				hist, _ = updateHistogram(v, hist)
+				hist = updateHistogram(v, hist)
 			}
 		})
 		if calcBoxplot {
@@ -140,7 +143,7 @@ func main() {
 		} else {
 			values = reader.ReadAll()
 		}
-		hist, _ := updateHistogram(values, nil)
+		hist := updateHistogram(values, nil)
 		if normalize || logarithmic {
 			log.Println("Normalizing")
 			normalizeHistogram(hist, normalize, logarithmic)
@@ -155,17 +158,19 @@ func main() {
 	}
 }
 
-func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Histogram, countTotal uint64) {
+func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Histogram) {
 	if histBuckets == nil {
 		histBuckets = &Histogram{
 			data:      make(map[int]float64, 0),
 			minBucket: math.MaxInt,
 			maxBucket: math.MinInt,
+			mean:      0,
+			variance:  0,
 		}
 	}
 
 	for _, val := range values {
-		countTotal++
+		histBuckets.total++
 		i := int(math.Floor((val - binStart) / binSize))
 		if _, has := histBuckets.data[i]; !has {
 			histBuckets.data[i] = 0
@@ -177,9 +182,12 @@ func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Hist
 		if i > histBuckets.maxBucket {
 			histBuckets.maxBucket = i
 		}
+		newMean := histBuckets.mean + (val-histBuckets.mean)/float64(histBuckets.total)
+		histBuckets.variance += (val - histBuckets.mean) * (val - newMean)
+		histBuckets.mean = newMean
 	}
-	log.Printf("Updated histogram with %d new entries", countTotal)
-	return histBuckets, countTotal
+	log.Printf("Updated histogram to %d new entries", histBuckets.total)
+	return histBuckets
 }
 
 func normalizeHistogram(hist *Histogram, normalize, logarithmic bool) {
@@ -277,7 +285,7 @@ func writeHistogram(histBuckets *Histogram, addData ...float64) {
 	csvOut := csv.NewWriter(f)
 	defer csvOut.Flush()
 
-	header := []string{"BucketStartIncl", "BucketEndExcl", "Count"}
+	header := []string{"BucketStartIncl", "BucketEndExcl", "Count", "Mean:" + strconv.FormatFloat(histBuckets.mean, 'f', -1, 64), "Var:" + strconv.FormatFloat(histBuckets.variance/(float64(histBuckets.total)-1), 'f', -1, 64)}
 	for i := range addData {
 		header = append(header, strconv.FormatFloat(addData[i], 'f', -1, 64))
 	}
@@ -301,9 +309,14 @@ func writeBoxplotTex(boxplot *BoxPlot) {
 	}
 	defer f.Close()
 
+	var outliers = make([]float64, 0, len(boxplot.outliers))
 	outliersStr := ""
 	for v := range boxplot.outliers {
-		outliersStr += strconv.FormatFloat(v, 'f', -1, 64) + "\\\\"
+		outliers = append(outliers, v)
+	}
+	slices.Sort(outliers)
+	for i := range outliers {
+		outliersStr += strconv.FormatFloat(outliers[i], 'f', -1, 64) + "\\\\"
 	}
 	f.WriteString(fmt.Sprintf(`\addplot+ [
 	boxplot prepared={

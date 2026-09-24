@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcapgo"
 )
 
@@ -24,6 +25,10 @@ var (
 	calculateSpeed     int    = 0
 	outFile            string = "timings.csv"
 )
+
+type CapReader interface {
+	ZeroCopyReadPacketData() (data []byte, ci gopacket.CaptureInfo, err error)
+}
 
 const SPEED_EXCLUSIVE = false // set true to only produce speed result if -speed is set
 
@@ -116,35 +121,39 @@ func processPcapFile(f string, out packet.DataOutput) {
 		reader = fRead
 	}
 
+	var capRead CapReader
 	if strings.HasSuffix(f, ".pcapng") {
-		capRead, err := pcapgo.NewNgReader(reader, pcapgo.DefaultNgReaderOptions)
+		capRead, err = pcapgo.NewNgReader(reader, pcapgo.DefaultNgReaderOptions)
 		if err != nil {
 			log.Fatalf("Could not read pcapng file %s: %v", f, err)
 		}
+	} else {
+		capRead, err = pcapgo.NewReader(reader)
+		if err != nil {
+			log.Fatalf("Could not read pcap file %s: %v", f, err)
+		}
+	}
 
-		defer out.Flush()
-		defer packetMissingReport()
-		for i := 0; ; i++ {
-			data, info, err := capRead.ZeroCopyReadPacketData()
-			if err != nil {
-				log.Printf("Processed %d packets from %s", i, f)
-				if err != io.EOF {
-					log.Printf("Finishing reading %s due to %v", f, err)
-				}
-				return
+	defer out.Flush()
+	defer packetMissingReport()
+	for i := 0; ; i++ {
+		data, info, err := capRead.ZeroCopyReadPacketData()
+		if err != nil {
+			log.Printf("Processed %d packets from %s", i, f)
+			if err != io.EOF {
+				log.Printf("Finishing reading %s due to %v", f, err)
 			}
-			if !SPEED_EXCLUSIVE || speed == nil {
-				packets := parsePacket(i, data, info)
-				for _, p := range packets {
-					out.WritePacket(p)
-				}
-			}
-			if speed != nil {
-				speed.speed_analyzer_addPacket(i, data, info)
+			return
+		}
+		if !SPEED_EXCLUSIVE || speed == nil {
+			packets := parsePacket(i, data, info)
+			for _, p := range packets {
+				out.WritePacket(p)
 			}
 		}
-	} else {
-		log.Fatalln("NOT IMPLEMENTED: pcap files")
+		if speed != nil {
+			speed.speed_analyzer_addPacket(i, data, info)
+		}
 	}
 }
 
