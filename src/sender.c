@@ -8,18 +8,48 @@
 
 LOG_MODULE_REGISTER(ats_sender, CONFIG_ATS_LOG_LEVEL);
 
-#define useStaticBuf  // If defined: Manually allocate continuous buffer for all packets, if not defined: Use standard packet allocation from zephyr
-#define sendDirectAts // If defined: Don't send through zephyr stack but send directly into ats
-// #define pseudoPtpPackets // If defined: Format packets as PTPv2 sync messages (e.g. for one-step stimestamping), if not defined: send with all 0xff bytes
-#define nodelay
+#define useStaticBuf // If defined: Manually allocate continuous buffer for all packets, if not defined: Use standard packet allocation from zephyr
+// #define sendDirectAts // If defined: Don't send through zephyr stack but send directly into ats
+//  #define pseudoPtpPackets // If defined: Format packets as PTPv2 sync messages (e.g. for one-step stimestamping), if not defined: send with all 0xff bytes
+#define CONFIG_ATS_SENDER_MAX_THREADS 6
 
 #ifdef useStaticBuf
-#define CONFIG_NUM_BUFFERS ((CONFIG_ATS_QUEUE_LENGTH + 1) * 5)
-NET_BUF_POOL_VAR_ALIGN_DEFINE(sender_bufs, CONFIG_NUM_BUFFERS, CONFIG_NUM_BUFFERS * 1500, 0, NULL, 0);
+#define CONFIG_NUM_BUFFERS (CONFIG_ATS_QUEUE_LENGTH + 2)
+#define CONFIG_NUM_BUFFERS_TOTAL (CONFIG_NUM_BUFFERS * CONFIG_ATS_SENDER_MAX_THREADS + 1)
+NET_BUF_POOL_VAR_ALIGN_DEFINE(sender_bufs, CONFIG_NUM_BUFFERS_TOTAL, CONFIG_NUM_BUFFERS_TOTAL * 1500, 0, NULL, 0);
 #endif
 
 struct net_buf_pool *tx_bufs;
 struct net_buf_pool *rx_bufs;
+
+K_HEAP_DEFINE(sender_thread_heap, sizeof(struct sender_params) * CONFIG_ATS_SENDER_MAX_THREADS);
+static K_THREAD_STACK_ARRAY_DEFINE(sender_thread_stack, CONFIG_ATS_SENDER_MAX_THREADS, 1024);
+static struct k_thread sender_thread_data[CONFIG_ATS_SENDER_MAX_THREADS];
+int sender_threads_count = 0;
+static struct sender_params sender_thread_params[CONFIG_ATS_SENDER_MAX_THREADS];
+
+void sender_start(struct net_if *iface, uint16_t maxPacket, uint32_t minTUs, uint32_t maxTUs, bool regular, int prio)
+{
+    if (sender_threads_count >= CONFIG_ATS_SENDER_MAX_THREADS)
+    {
+        return;
+    }
+    int i = sender_threads_count++;
+    struct sender_params *params = &sender_thread_params[i];
+    params->iface = iface;
+    params->maxPacket = maxPacket;
+    params->maxIntervalUs = maxTUs;
+    params->minIntervalUs = minTUs;
+    params->regular = regular;
+
+    char name[10];
+    sprintf(name, "sender%d", i);
+    k_tid_t sender_tid = k_thread_create(
+        &sender_thread_data[i], &sender_thread_stack[i][0], 1024,
+        sender, params, NULL, NULL,
+        prio, 0, K_NO_WAIT);
+    k_thread_name_set(sender_tid, name);
+}
 
 static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t size
 #ifdef pseudoPtpPackets
@@ -39,7 +69,8 @@ static struct net_pkt *allocate_and_prepare_pkt(struct net_if *iface, uint16_t s
 #endif
 
 #ifdef useStaticBuf
-    struct net_pkt *pkt = net_pkt_alloc_on_iface(iface, K_FOREVER);
+    struct net_pkt *pkt = net_pkt_alloc_on_iface(iface, K_NO_WAIT);
+    __ASSERT(pkt != NULL, "Couldn't allocate packet in sender, check if CONFIG_NET_PKT_TX_COUNT big enough");
     struct net_buf *buf = net_buf_alloc_len(&sender_bufs, size, K_NO_WAIT);
     __ASSERT(buf != NULL, "Couldn't allocate buffer for packet in sender");
     net_buf_reset(buf);
@@ -109,7 +140,7 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
     LOG_INF("sender started");
 
-    uint32_t maxTokenRate = params->maxPacket * 1000000 / params->maxIntervalUs;
+    uint32_t maxTokenRate = params->maxIntervalUs > 1000000 ? (params->maxIntervalUs) : (params->maxPacket * 1000000 / params->maxIntervalUs);
     if (!params->regular)
     {
         maxTokenRate = params->maxPacket * 1000000 / ((params->minIntervalUs + params->maxIntervalUs) / 2);
@@ -134,8 +165,8 @@ void sender(void *sender_parameters, void *p2, void *p3)
     {
 
         uint8_t i = 0;
-        struct net_pkt *pkts[CONFIG_ATS_QUEUE_LENGTH + 1];
-        for (i = 0; i < CONFIG_ATS_QUEUE_LENGTH + 1; i++)
+        struct net_pkt *pkts[CONFIG_NUM_BUFFERS];
+        for (i = 0; i < CONFIG_NUM_BUFFERS; i++)
         {
             pkts[i] = allocate_and_prepare_pkt(params->iface, params->maxPacket
 #ifdef pseudoPtpPackets
@@ -145,9 +176,10 @@ void sender(void *sender_parameters, void *p2, void *p3)
             );
             net_pkt_set_ats_stream(pkts[i], schedId);
             *(pkts[i]->buffer->__buf + offset - 2) = schedId;
-            *(pkts[i]->buffer->__buf + offset - 1) = 0;
+            *(pkts[i]->buffer->__buf + offset - 1) = (uint8_t)i;
         }
 
+        k_sleep(K_MSEC(100));
         i = 0;
         struct net_pkt *pkt = pkts[i];
         while (true)
@@ -165,9 +197,9 @@ void sender(void *sender_parameters, void *p2, void *p3)
 
             int res = net_send_data(pkt);
 #endif
-            if (!res)
+            if (res == 0 && !net_pkt_eof(pkt))
             {
-                i = (i + 1) % (CONFIG_ATS_QUEUE_LENGTH + 1);
+                i = (i + 1) % (CONFIG_NUM_BUFFERS);
                 pkt = pkts[i];
             }
 
@@ -178,11 +210,14 @@ void sender(void *sender_parameters, void *p2, void *p3)
 #endif
             memcpy(pkt->buffer->__buf + offset, &counter, sizeof(uint64_t));
 
-#ifndef nodelay
-            k_sleep(K_USEC(params->minIntervalUs));
-#else
-            k_yield();
-#endif
+            if (params->minIntervalUs == 0)
+            {
+                k_yield();
+            }
+            else
+            {
+                k_sleep(K_USEC(params->minIntervalUs));
+            }
         }
     }
     else

@@ -16,6 +16,8 @@ struct sender_params
 
 void sender(void *sender_parameters, void *p2, void *p3);
 
+void sender_start(struct net_if *iface, uint16_t maxPacket, uint32_t minTUs, uint32_t maxTUs, bool regular, int prio);
+
 #else // CONFIG_ATS_SOFTWARE_DRIVER
 
 struct sender_params
@@ -23,6 +25,9 @@ struct sender_params
 };
 #define sender(...) \
     {               \
+    }
+#define sender_start(...) \
+    {                     \
     }
 
 #endif // CONFIG_ATS_SOFTWARE_DRIVER
