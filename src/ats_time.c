@@ -1,4 +1,5 @@
 #include "ats_time.h"
+#include "tracing_helper.h"
 
 #include <zephyr/logging/log.h>
 #ifdef CONFIG_ATS_LOG_LEVEL
@@ -144,20 +145,25 @@ int ats_time_set_alarm(uint64_t time)
     uint32_t nowGpt;
     ats_time_get(&now);
     counter_get_value(ats_time_gpt_dev, &nowGpt);
-    time = (time - now) * 24 / 100;
+    now = (time - now) * 24 / 100;
 #ifdef CONFIG_ATS_ASSERT_ON_SEND
-    __ASSERT(time < (1LL << 31), "Cannot set counter alarm callback more than %" PRId64 " in the future!", (1LL << 31));
+    __ASSERT(now < (1LL << 31), "Cannot set counter alarm callback more than %" PRId64 " in the future!", (1LL << 31));
 #endif
-    time += nowGpt;
+    now += nowGpt;
     struct counter_alarm_cfg alarm = {
         .callback = ats_time_counter_alarm_cb,
         .flags = COUNTER_ALARM_CFG_ABSOLUTE,
-        .ticks = time};
+        .ticks = now};
 
-    counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
+    if (ats_time_alarm_time.valid)
+    {
+        counter_cancel_channel_alarm(ats_time_gpt_dev, 0);
+    }
     ats_time_alarm_time.valid = true;
     ats_time_alarm_time.tick = time;
-    return counter_set_channel_alarm(ats_time_gpt_dev, 0, &alarm);
+    int res = counter_set_channel_alarm(ats_time_gpt_dev, 0, &alarm);
+    ats_trace_counter_update_ats_time(now - nowGpt, time);
+    return res;
 }
 
 int ats_time_cancel_alarm()
