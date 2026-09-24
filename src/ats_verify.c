@@ -81,7 +81,7 @@ void ats_verify_timestamp_callback(struct net_pkt *pkt)
     memcpy(&ats_verify_instance.lastTransmitTimestampStreamId, pkt->buffer->__buf + offset - 2, sizeof(uint16_t));
 }
 
-void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t arrivalTime)
+void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t arrivalTime, uint8_t enqIndex)
 {
     uint8_t offset = 16;
     if (net_pkt_ll_proto_type(pkt) == NET_ETH_PTYPE_PTP)
@@ -95,16 +95,17 @@ void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t ar
     {
         ((uint64_safe_t *)(pkt->buffer->__buf + offset + 8))->val = arrivalTime;
 
-        if (net_pkt_get_len(pkt) >= offset + 50)
+        if (net_pkt_get_len(pkt) >= offset + 52)
         {
             ((uint64_safe_t *)(pkt->buffer->__buf + offset + 32))->val = ats_verify_instance.lastTransmitTimestamp;
             ((uint64_safe_t *)(pkt->buffer->__buf + offset + 40))->val = ats_verify_instance.lastTransmitTimestampPacketId;
             ((uint16_safe_t *)(pkt->buffer->__buf + offset + 48))->val = ats_verify_instance.lastTransmitTimestampStreamId;
+            *((uint8_t *)(pkt->buffer->__buf + offset + 51)) = enqIndex;
         }
     }
 }
 
-void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime)
+void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime, uint8_t sendFlags)
 {
     uint16_t i;
     unsigned int key = irq_lock();
@@ -144,6 +145,10 @@ void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegib
     {
         ((uint64_safe_t *)(pkt->buffer->__buf + offset + 16))->val = elegibilityTime;
         ((uint64_safe_t *)(pkt->buffer->__buf + offset + 24))->val = write->sentTimestamp;
+        if (write->packetSize >= offset + 51)
+        {
+            *(uint8_t *)(pkt->buffer->__buf + offset + 50) = sendFlags;
+        }
     }
 }
 

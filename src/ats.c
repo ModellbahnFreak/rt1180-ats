@@ -5,6 +5,7 @@
 #include <zephyr/sys/__assert.h>
 #include "ats.h"
 #include "constants.h"
+#include "tracing_helper.h"
 #ifdef CONFIG_ATS_VERIFY_ENABLED
 #include "ats_verify.h"
 #endif
@@ -25,8 +26,12 @@ STRUCT_SECTION_ITERABLE_ARRAY(ats, ats_instances, CONFIG_ATS_STRUCT_ITERABLE_SIZ
 
 void ats_counter_alarm_cb();
 
+ats_trace_vars
+
 struct ats *ats_init(struct net_if *iface)
 {
+
+    ats_trace_init();
     LOG_INF("Initializing ATS struct for iface %s", net_if_get_config(iface)->name);
     LOG_DBG("allocating %d schedulers, %d groups and %d queue slots/group", CONFIG_ATS_SCHEDULER_INSTANCES, CONFIG_ATS_GROUP_INSTANCES, CONFIG_ATS_QUEUE_LENGTH);
 
@@ -74,6 +79,7 @@ struct ats *ats_init(struct net_if *iface)
 #endif
 
     newInst->iface = iface;
+    k_mutex_init(&newInst->atsGlobalMutex);
 
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
@@ -117,6 +123,8 @@ uint8_t ats_register_scheduler(struct ats *ats_data, int groupId, uint32_t infor
     __ASSERT(groupId < CONFIG_ATS_GROUP_INSTANCES, "invalid ATS group id %d, out of range of %d available groups", groupId, CONFIG_ATS_GROUP_INSTANCES);
     __ASSERT(informationRate > 0, "committed information rate (CIR, informationRate) must be greater than 0!");
     __ASSERT(burstSize > 0, "committed burst size (CBS, burstSize) must be greater than 0!");
+    k_mutex_lock(&ats_data->atsGlobalMutex, K_FOREVER);
+
     int schedulerId = -1;
     for (int i = 0; i < CONFIG_ATS_SCHEDULER_INSTANCES; i++)
     {
@@ -154,21 +162,23 @@ uint8_t ats_register_scheduler(struct ats *ats_data, int groupId, uint32_t infor
     ats_data->scheduler[schedulerId].schedulerGroup = groupId;
     ats_data->scheduler[schedulerId].emptyToFullTimeTicks = ((uint64_t)burstSize * (uint64_t)TICKS_PER_SECOND) / informationRate;
 
+    k_mutex_unlock(&ats_data->atsGlobalMutex);
     return schedulerId;
 }
 
 int ats_send_iface(struct ats_group *group, struct net_pkt *pkt
 #ifdef CONFIG_ATS_VERIFY_ENABLED
                    ,
-                   uint64_t elegibilityTime
+                   uint64_t elegibilityTime, uint8_t sendFlags
 #endif
 )
 {
+    ats_trace_transmit(*(uint64_t *)(pkt->buffer->__buf + 16));
     LOG_DBG("Group %p sending packet with %d bytes", group, net_pkt_get_len(pkt));
     net_pkt_set_iface(pkt, group->parent->iface);
     net_pkt_cursor_init(pkt);
 #ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_packet_sent(group, pkt, elegibilityTime);
+    ats_verify_packet_sent(group, pkt, elegibilityTime, sendFlags);
 #endif
     const struct ethernet_api *api = group->parent->ifaceDevice->api;
     int res = api->send(group->parent->ifaceDevice, pkt);
@@ -200,7 +210,7 @@ int ats_process_queue(struct ats_group *group, uint64_t now)
         ret = ats_send_iface(group, pkt.packet
 #ifdef CONFIG_ATS_VERIFY_ENABLED
                              ,
-                             pkt.elegibilityTime
+                             pkt.elegibilityTime, (k_is_in_isr() ? ATS_VERIFY_SEND_FLAG_ISR : 0) | (oldLen == -1 ? 0 : ATS_VERIFY_SEND_FLAG_MORE)
 #endif
         );
         LOG_IF_ERR(ret, "error while sending packets from queue of ATS group %p: %d", group, ret);
@@ -356,7 +366,10 @@ int ats_update_counter_alarm_tmp(uint64_t nextElegibilityTime, bool timerExpired
 int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, uint64_t *outUsedNow)
 {
     uint64_t timeAfter;
+    // uint64_t timeBefore;
+    // ats_time_get(&timeBefore);
     int res = ats_update_counter_alarm_tmp(nextElegibilityTime, timerExpired, outUsedNow);
+    ats_trace_counter_update(nextElegibilityTime, (nextElegibilityTime - *outUsedNow), res);
     ats_time_get(&timeAfter);
     LOG_DBG("time needed for update: %" PRIu64, TICK_REL_TIME(*outUsedNow, timeAfter));
     return res;
@@ -364,6 +377,7 @@ int ats_update_counter_alarm(uint64_t nextElegibilityTime, bool timerExpired, ui
 
 void ats_counter_alarm_cb(uint64_t ticks)
 {
+    ats_trace_alarm_cb(ticks);
     LOG_DBG("counter alarm at %" PRId64, ticks);
     ats_time_t nextElegibilityTime = {.valid = false};
     do
@@ -396,6 +410,7 @@ void ats_counter_alarm_cb(uint64_t ticks)
 
 int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
 {
+    ats_trace_new_pkt(schedId, *(uint64_t *)(pkt->buffer->__buf + 16));
     uint64_t now;
     ats_time_get(&now);
     size_t pktSize = net_pkt_get_len(pkt);
@@ -416,6 +431,7 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
     {
         // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
         LOG_WRN("group %d packet elegibility time (%" PRId64 ") more than %" PRId64 " ticks after now (%" PRId64 ") => longer than absolut maximum residence. Dropping packet from scheduler %d", groupId, elegibilityTime.tick, TICK_MAX_INTERVAL, now, schedId);
+        net_pkt_set_eof(pkt, true);
         return -1; // todo: proper error codes
     }
     struct ats_enqued_packet packet =
@@ -429,19 +445,20 @@ int ats_send(struct ats *ats_data, uint8_t schedId, struct net_pkt *pkt)
         // packet queue full, can't process packet (even if it were immediately elegible)
         // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
         LOG_INF("group %d packet queue is full (%d packets). Dropping packet from scheduler %d", groupId, CONFIG_ATS_QUEUE_LENGTH, schedId);
+        net_pkt_set_eof(pkt, true);
         return -1; // todo: proper error codes
     }
     ats_data->scheduler[schedId].bucketEmptyTimeTicks = newBucketEmptyTime;
     ats_data->group[groupId].groupElegibilityTimeTicks = elegibilityTime.tick;
     // k_mutex_unlock(&(ats_data->group[groupId].elegibilityTimeMutex));
 
-#ifdef CONFIG_ATS_VERIFY_ENABLED
-    ats_verify_packet_enqueued(&(ats_data->group[groupId]), pkt, now);
-#endif
-
     net_pkt_ref(pkt);
 
     atomic_val_t oldLen = atomic_inc(&(ats_data->group[groupId].queueLen));
+    net_pkt_set_eof(pkt, false);
+#ifdef CONFIG_ATS_VERIFY_ENABLED
+    ats_verify_packet_enqueued(&(ats_data->group[groupId]), pkt, now, oldLen | (queue->used_msgs << 4));
+#endif
     if (oldLen > 0)
     {
         // queue was not empty => timer already running

@@ -110,6 +110,8 @@ struct ats
     struct net_if *iface;
     /** @internal Device used for packet transmission (for DSA interfaces the conduit port device) */
     const struct device *ifaceDevice;
+    /** Mutex to make access to ats-instance-global variables thread safe */
+    struct k_mutex atsGlobalMutex;
 };
 
 #ifdef CONFIG_ATS_SOFTWARE_DRIVER
@@ -121,6 +123,8 @@ struct ats
  * Note: Initialization can't be undone.
  *
  * Errors if no free ATS structure remains
+ * 
+ * WARNING: Not tread safe! Only call from one thread (e.g. main thread)
  *
  * @param iface The upstream l2 ethernet interface to send scheduled packets via
  */

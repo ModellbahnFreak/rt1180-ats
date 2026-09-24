@@ -4,9 +4,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_pkt.h>
 
-void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t arrivalTime);
+#define ATS_VERIFY_SEND_FLAG_ISR 0b1
+#define ATS_VERIFY_SEND_FLAG_MORE 0b10
 
-void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime);
+void ats_verify_packet_enqueued(void *streamId, struct net_pkt *pkt, uint64_t arrivalTime, uint8_t enqIndex);
+
+void ats_verify_packet_sent(void *streamId, struct net_pkt *pkt, uint64_t elegibilityTime, uint8_t sendFlags);
 
 void ats_verify_set_stream_parameters(void *streamId, void *ats_data, uint32_t informationRate, uint32_t burstSize);
 
