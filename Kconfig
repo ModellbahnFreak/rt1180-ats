@@ -19,7 +19,7 @@ config ATS_NUM_INTERFACES
 
 config ATS_SCHEDULER_INSTANCES
 	int "Number of ATS instances (maximum number of apps/streams)"
-    default 5
+    default 6
 	range 1 255
 	help
 	  The maximum number of ATS instances to allocate space for per iface/traffic class.
@@ -27,7 +27,7 @@ config ATS_SCHEDULER_INSTANCES
 
 config ATS_GROUP_INSTANCES
 	int "Number of ATS groups"
-    default 5
+    default 6
 	range 1 255
 	help
 	  The maximum number of ATS groups to allocate space for per iface/traffic class.
@@ -54,7 +54,7 @@ config ATS_ASSERT_ON_SEND
 
 config ATS_TIMER_EPSILON_NS
 	int "Number of nanoseconds of allowable jitter for timer updating"
-	default 1000
+	default 4000
 	help
 	  The number of nanoseconds to use as tolerance when setting a new timer expiry.
 	  In the case a new packet with elegibility time within this epsilon arrives, it will ony be sent up to this amount of time later.
