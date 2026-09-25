@@ -5,7 +5,7 @@ import (
 )
 
 type PacketTimings struct {
-	Stream         uint16
+	Stream         uint8
 	I              uint64
 	Enqueue        time.Duration
 	Eligibility    time.Duration

@@ -179,7 +179,7 @@ func (in *CsvInput) ReadAllPackets() (values []*PacketTimings) {
 	var err error
 	var line []string
 	for line, err = in.readNext(); err == nil; line, err = in.readNext() {
-		stream, err := strconv.ParseUint(line[0], 10, 16)
+		stream, err := strconv.ParseUint(line[0], 10, 8)
 		if err != nil {
 			log.Fatalln("Could not parse input:", err)
 		}
@@ -224,7 +224,7 @@ func (in *CsvInput) ReadAllPackets() (values []*PacketTimings) {
 			log.Fatalln("Could not parse input:", err)
 		}
 		values = append(values, &PacketTimings{
-			Stream:         uint16(stream),
+			Stream:         uint8(stream),
 			I:              i,
 			Enqueue:        time.Duration(enqueue),
 			Eligibility:    time.Duration(eligibility),

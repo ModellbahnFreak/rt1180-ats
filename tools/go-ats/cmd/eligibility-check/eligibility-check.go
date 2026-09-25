@@ -60,10 +60,10 @@ func main() {
 
 	log.Println("Starting eligibility time verificaion")
 
-	groupEt := make(map[uint16]time.Duration, len(streams))
-	bucketEmpty := make(map[uint16]time.Duration, len(streams))
-	numPacketsInStream := make(map[uint16]int, len(streams))
-	lastPacket := make(map[uint16]*packet.PacketTimings)
+	groupEt := make(map[uint8]time.Duration, len(streams))
+	bucketEmpty := make(map[uint8]time.Duration, len(streams))
+	numPacketsInStream := make(map[uint8]int, len(streams))
+	lastPacket := make(map[uint8]*packet.PacketTimings)
 	for i := range packets {
 		p := packets[i]
 		if p == nil {

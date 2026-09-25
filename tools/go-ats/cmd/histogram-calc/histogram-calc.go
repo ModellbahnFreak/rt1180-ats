@@ -29,7 +29,7 @@ var (
 	blockSize    int     = -2
 	calcBoxplot  bool    = true
 	roundTo      int     = -400
-	normalize    bool    = false
+	normalize    float64 = math.NaN()
 	logarithmic  bool    = false
 )
 
@@ -47,7 +47,18 @@ func init() {
 	flag.IntVar(&blockSize, "block", blockSize, "Number of lines to process at a time. -1 processes all lines at once (!RAM!)")
 	flag.BoolVar(&calcBoxplot, "boxplot", calcBoxplot, "Set this flag to false to disable boxplot calculation (Needs whole dataset in ram)")
 	flag.IntVar(&roundTo, "round", roundTo, "number of decimal digits to round to (neg before the decimal point); after factor")
-	flag.BoolVar(&normalize, "normalize", normalize, "Set this flag to normalize hostogram to 1=max count")
+	flag.Func("normalize", "Set this flag to normalize hostogram to 1=max count, set it to a number to normalize to that", func(s string) error {
+		if s == "" {
+			normalize = math.Inf(1)
+			return nil
+		}
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("Parameter to -normalize must be either nothing (to find max) or a valid float to normalize to: %v", err)
+		}
+		normalize = v
+		return nil
+	})
 	flag.BoolVar(&logarithmic, "log", logarithmic, "Set this flag to calculate log of values")
 }
 
@@ -123,8 +134,7 @@ func main() {
 		}
 		reader.ReadBlocks(blockSize, valCh)
 		wg.Wait()
-		if normalize || logarithmic {
-			log.Println("Normalizing")
+		if !math.IsNaN(normalize) || logarithmic {
 			normalizeHistogram(hist, normalize, logarithmic)
 		}
 		log.Println("Writing output")
@@ -144,7 +154,7 @@ func main() {
 			values = reader.ReadAll()
 		}
 		hist := updateHistogram(values, nil)
-		if normalize || logarithmic {
+		if !math.IsNaN(normalize) || logarithmic {
 			log.Println("Normalizing")
 			normalizeHistogram(hist, normalize, logarithmic)
 		}
@@ -190,14 +200,19 @@ func updateHistogram(values []float64, histBuckets *Histogram) (resBuckets *Hist
 	return histBuckets
 }
 
-func normalizeHistogram(hist *Histogram, normalize, logarithmic bool) {
-	if normalize {
+func normalizeHistogram(hist *Histogram, normalize float64, logarithmic bool) {
+	if !math.IsNaN(normalize) {
 		var maxCount float64 = -1
-		for _, c := range hist.data {
-			if c > maxCount {
-				maxCount = c
+		if math.IsInf(normalize, 0) {
+			for _, c := range hist.data {
+				if c > maxCount {
+					maxCount = c
+				}
 			}
+		} else {
+			maxCount = normalize
 		}
+		log.Printf("Normalizing to %f", maxCount)
 		for i, c := range hist.data {
 			hist.data[i] = c / maxCount
 		}

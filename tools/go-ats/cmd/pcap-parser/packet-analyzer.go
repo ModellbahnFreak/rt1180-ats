@@ -9,15 +9,16 @@ import (
 	"github.com/google/gopacket"
 )
 
-var packetsWithoutHwTime map[uint16]map[uint64]*packet.PacketTimings = make(map[uint16]map[uint64]*packet.PacketTimings, 5)
-var prevPacket map[uint16]map[uint64]*packet.PacketTimings = make(map[uint16]map[uint64]*packet.PacketTimings, 5)
+var packetsWithoutHwTime = make(map[uint8]map[uint64]*packet.PacketTimings, 5)
+var prevPacket = make(map[uint8]map[uint64]*packet.PacketTimings, 5)
 var numHwErrors = 0
 
-var lastSeenId = make(map[uint16]uint64)
-var missingIds = make(map[uint16]int)
-var duplicateIds = make(map[uint16]int)
+var lastSeenId = make(map[uint8]uint64)
+var missingIds = make(map[uint8]int)
+var duplicateIds = make(map[uint8]int)
 var countDropped = 0
-var countTotal = make(map[uint16]int)
+var countTotal = make(map[uint8]int)
+var headerMissing = 0
 
 func flushPackets(streamId int) (res []*packet.PacketTimings) {
 	res = make([]*packet.PacketTimings, 0, len(packetsWithoutHwTime))
@@ -28,7 +29,7 @@ func flushPackets(streamId int) (res []*packet.PacketTimings) {
 			}
 			clear(stream)
 		}
-	} else if stream, has := packetsWithoutHwTime[uint16(streamId)]; has {
+	} else if stream, has := packetsWithoutHwTime[uint8(streamId)]; has {
 		for _, p := range stream {
 			res = append(res, p)
 		}
@@ -45,6 +46,7 @@ func packetMissingReport() {
 		log.Printf("Stream %d: Last ID: %d, Missing IDs: %d, Duplicate IDs: %d, Stream Total: %d", s, lastSeenId[s], missingIds[s], duplicateIds[s], countTotal[s])
 	}
 	log.Printf("Dropped status: %d, Total packets: %d", countDropped, absTotal)
+	log.Printf("Number of packets with missing ethernet header: %d", headerMissing)
 }
 
 func packetCheckMissingDuplicate(p *packet.PacketTimings) {
@@ -78,9 +80,13 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packet.P
 		return
 	}
 
-	offset := 14
 	var correction time.Duration
-	if binary.BigEndian.Uint16(data[12:]) == 0x88f7 {
+	offset := 14
+	if (binary.LittleEndian.Uint64(data)&0xffffffffffff) != 0xffffffffffff && (info.Length+offset)%100 == 0 {
+		// Frame was sent with wrong offset again, leaving no ethernet header
+		offset = 2
+		headerMissing++
+	} else if binary.BigEndian.Uint16(data[12:]) == 0x88f7 {
 		if len(data) >= offset+16 {
 			correction = time.Duration(binary.LittleEndian.Uint64(data[offset+8:]))
 		}
@@ -94,7 +100,7 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packet.P
 	}
 
 	p := &packet.PacketTimings{
-		Stream:       binary.LittleEndian.Uint16(data[offset-2:]),
+		Stream:       data[offset-2],
 		I:            binary.LittleEndian.Uint64(data[offset+0:]),
 		Enqueue:      time.Duration(binary.LittleEndian.Uint64(data[offset+8:])),
 		Eligibility:  time.Duration(binary.LittleEndian.Uint64(data[offset+16:])),
@@ -143,10 +149,10 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packet.P
 	hwTimePacketId := binary.LittleEndian.Uint64(data[offset+40:])
 	hwTimeStreamId := binary.LittleEndian.Uint16(data[offset+48:])
 	if hwTime > 0 && hwTimePacketId > 0 {
-		if hwTimeStreamId == p.Stream && hwTimePacketId == p.I {
+		if uint8(hwTimeStreamId) == p.Stream && hwTimePacketId == p.I {
 			log.Printf("Stream %d: Packet %d of delivered its own transmit timestamp. Not possible!", p.Stream, p.I)
 		} else {
-			if thisStreamMap, has := packetsWithoutHwTime[hwTimeStreamId]; has {
+			if thisStreamMap, has := packetsWithoutHwTime[uint8(hwTimeStreamId)]; has {
 				if hwP, has := thisStreamMap[hwTimePacketId]; has {
 					hwP.HwTransmission = hwTime
 					delete(thisStreamMap, hwTimePacketId)
