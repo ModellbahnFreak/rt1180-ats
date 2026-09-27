@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"flag"
+	"fmt"
 	"go-ats/packet"
 	"io"
 	"io/fs"
@@ -24,6 +25,7 @@ var (
 	waitForNextFile    bool   = true
 	calculateSpeed     int    = 0
 	outFile            string = "timings.csv"
+	stopAfter          int    = 0
 )
 
 type CapReader interface {
@@ -34,6 +36,8 @@ const SPEED_EXCLUSIVE = false // set true to only produce speed result if -speed
 
 var knownFileSizes map[string]int64 = make(map[string]int64)
 var speed *speed_analyzer
+var totalPacketCount = 0
+var ERR_STOP_LIMIT_REACHED = fmt.Errorf("Reached set packet limit")
 
 func init() {
 	flag.StringVar(&inFile, "in", inFile, "Input pcap(ng) file to parse. If set, no automatic file detection will happen")
@@ -42,6 +46,7 @@ func init() {
 	flag.BoolVar(&waitForNextFile, "nextFile", waitForNextFile, "Set this flag, to only read files once the next file exists")
 	flag.IntVar(&calculateSpeed, "speed", calculateSpeed, "Set this flag to the bucket size in ms to calculate the average speed at which packets are received. Exported to separate csv.")
 	flag.StringVar(&outFile, "out", outFile, "Path to the output csv file")
+	flag.IntVar(&stopAfter, "stopAfter", stopAfter, "Number of packets to stop parsing after (<= 0 no limit)")
 }
 
 func main() {
@@ -91,7 +96,14 @@ func main() {
 			log.Println("Reading folder")
 			files := findAllPcapFiles(false)
 			for _, f := range files {
-				processPcapFile(path.Join(folderPath, f), out)
+				err := processPcapFile(path.Join(folderPath, f), out)
+				if err != nil {
+					if err == ERR_STOP_LIMIT_REACHED {
+						break
+					} else {
+						log.Fatalln("error in pcap processing:", err)
+					}
+				}
 				knownFileSizes[f] = -1
 			}
 			if !waitForNextFile && !ignoreInitialFiles {
@@ -101,19 +113,19 @@ func main() {
 	}
 }
 
-func processPcapFile(f string, out packet.DataOutput) {
+func processPcapFile(f string, out packet.DataOutput) error {
 	log.Printf("Processing %s", f)
 	var reader io.Reader
 	fRead, err := os.Open(f)
 	if err != nil {
-		log.Fatalf("Could not read file %s: %v", f, err)
+		return fmt.Errorf("could not read file %s: %v", f, err)
 	}
 	defer fRead.Close()
 	var has bool
 	if f, has = strings.CutSuffix(strings.ToLower(f), ".gz"); has {
 		gzRead, err := gzip.NewReader(fRead)
 		if err != nil {
-			log.Fatalf("Could not ungzip compressed file %s.gz: %v", f, err)
+			return fmt.Errorf("Could not ungzip compressed file %s.gz: %v", f, err)
 		}
 		defer gzRead.Close()
 		reader = gzRead
@@ -125,12 +137,12 @@ func processPcapFile(f string, out packet.DataOutput) {
 	if strings.HasSuffix(f, ".pcapng") {
 		capRead, err = pcapgo.NewNgReader(reader, pcapgo.DefaultNgReaderOptions)
 		if err != nil {
-			log.Fatalf("Could not read pcapng file %s: %v", f, err)
+			return fmt.Errorf("Could not read pcapng file %s: %v", f, err)
 		}
 	} else {
 		capRead, err = pcapgo.NewReader(reader)
 		if err != nil {
-			log.Fatalf("Could not read pcap file %s: %v", f, err)
+			return fmt.Errorf("Could not read pcap file %s: %v", f, err)
 		}
 	}
 
@@ -143,7 +155,7 @@ func processPcapFile(f string, out packet.DataOutput) {
 			if err != io.EOF {
 				log.Printf("Finishing reading %s due to %v", f, err)
 			}
-			return
+			return nil
 		}
 		if !SPEED_EXCLUSIVE || speed == nil {
 			packets := parsePacket(i, data, info)
@@ -153,6 +165,10 @@ func processPcapFile(f string, out packet.DataOutput) {
 		}
 		if speed != nil {
 			speed.speed_analyzer_addPacket(i, data, info)
+		}
+		totalPacketCount++
+		if totalPacketCount >= stopAfter {
+			return ERR_STOP_LIMIT_REACHED
 		}
 	}
 }
