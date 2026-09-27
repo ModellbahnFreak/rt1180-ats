@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go-ats/packet"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -27,6 +28,7 @@ var (
 	write0       bool    = false
 	valueFactor  float64 = 1
 	blockSize    int     = -2
+	blockWrite   bool    = true
 	calcBoxplot  bool    = true
 	roundTo      int     = -400
 	normalize    float64 = math.NaN()
@@ -45,6 +47,7 @@ func init() {
 	flag.BoolVar(&write0, "write0", write0, "If flag is set, empty bucktes will be written to the output, else they will be left out")
 	flag.Float64Var(&valueFactor, "factor", valueFactor, "A factor to apply to all values before histogram calculation")
 	flag.IntVar(&blockSize, "block", blockSize, "Number of lines to process at a time. -1 processes all lines at once (!RAM!)")
+	flag.BoolVar(&blockWrite, "blockWrite", blockWrite, "Set this flag in combination with -block to enable writing the current calculation result after every block instead of only at the end")
 	flag.BoolVar(&calcBoxplot, "boxplot", calcBoxplot, "Set this flag to false to disable boxplot calculation (Needs whole dataset in ram)")
 	flag.IntVar(&roundTo, "round", roundTo, "number of decimal digits to round to (neg before the decimal point); after factor")
 	flag.Func("normalize", "Set this flag to normalize hostogram to 1=max count, set it to a number to normalize to that", func(s string) error {
@@ -117,18 +120,55 @@ func main() {
 
 	if blockSize > 0 {
 		valCh := make([]chan []float64, 0, 2)
-		valCh = append(valCh, make(chan []float64))
+		valCh = append(valCh, make(chan []float64, 1))
+		var histCh chan Histogram = nil
+		var boxplotCh chan BoxPlot = nil
 		var wg sync.WaitGroup
+		if blockWrite {
+			histCh = make(chan Histogram)
+			boxplotCh = make(chan BoxPlot)
+			wg.Go(func() {
+				for h := range histCh {
+					log.Println("Writing intermediate histogram")
+					writeHistogram(&h)
+				}
+			})
+			wg.Go(func() {
+				for b := range boxplotCh {
+					log.Println("Writing intermediate boxplot")
+					writeBoxplotTex(&b)
+				}
+			})
+		}
 		wg.Go(func() {
 			for v := range valCh[0] {
+				if histCh != nil {
+					defer close(histCh)
+				}
 				hist = updateHistogram(v, hist)
+				if histCh != nil {
+					histCh <- Histogram{
+						data:      maps.Clone(hist.data),
+						minBucket: hist.minBucket,
+						maxBucket: hist.maxBucket,
+						total:     hist.total,
+						mean:      hist.mean,
+						variance:  hist.variance,
+					}
+				}
 			}
 		})
 		if calcBoxplot {
-			valCh = append(valCh, make(chan []float64))
+			valCh = append(valCh, make(chan []float64, 1))
 			wg.Go(func() {
+				if boxplotCh != nil {
+					defer close(boxplotCh)
+				}
 				for v := range valCh[1] {
 					boxPlot, values = updateBoxPlot(v, values, boxPlot, false)
+					if boxplotCh != nil {
+						boxplotCh <- *boxPlot
+					}
 				}
 			})
 		}
@@ -322,7 +362,7 @@ func writeHistogram(histBuckets *Histogram, addData ...float64) {
 func writeBoxplotTex(boxplot *BoxPlot) {
 	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_boxpl.tex"
 	if len(out) > 0 {
-		newFileName = strings.TrimSuffix(strings.TrimSuffix(in, path.Ext(out)), "_hist") + "_boxpl.tex"
+		newFileName = strings.TrimSuffix(strings.TrimSuffix(out, path.Ext(out)), "_hist") + "_boxpl.tex"
 	}
 	f, err := os.Create(newFileName)
 	if err != nil {

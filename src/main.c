@@ -115,16 +115,18 @@ int main(void)
 	// 800m: 100000000 = 80,693%
 	// 500m:  62500000
 	// 400m:  50000000
+	// 300m:  37500000
 	// 200m:  25000000
 	// 133.3m:16666667
 	// 100m:  12500000
 	// 1m:      125000
-	sender_start(iface, 1500, 0, 100000000, true, THREAD_PRIORITY);
-	//sender_start(iface, 1500, 0, 50000000, true, THREAD_PRIORITY);
-	//sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
-	//sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
-	//sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
-	//sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
+	sender_start(iface, 1500, 55, 25000000, true, THREAD_PRIORITY);
+	sender_start(iface, 1500, 0, 25000000, false, THREAD_PRIORITY + 5);
+	//   sender_start(iface, 1500, 1, 2000000, true, THREAD_PRIORITY + 1);
+	//    sender_start(iface, 1500, 1, 2000000, true, THREAD_PRIORITY + 1);
+	//    sender_start(iface, 1500, 1, 2000000, true, THREAD_PRIORITY + 1);
+	//      sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
+	//      sender_start(iface, 1500, 0, 16666667, true, THREAD_PRIORITY);
 
 	// speedtest_start(ats_iface_is_ats(iface) ? ats_iface_get_data(iface)->iface : iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1, true);
 	/*speedtest_start(ats_iface_is_ats(iface) ? ats_iface_get_data(iface)->iface : iface, CONFIG_NUM_PREEMPT_PRIORITIES - 1, true);
