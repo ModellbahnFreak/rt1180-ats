@@ -79,6 +79,9 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packet.P
 		log.Printf("Captured packet %d has no complete ethernet header", i)
 		return
 	}
+	if info.Length != len(data) {
+		log.Fatalf("Info length (%d) and len of data (%d) do not match", info.Length, len(data))
+	}
 
 	var correction time.Duration
 	offset := 14
@@ -109,6 +112,7 @@ func parsePacket(i int, data []byte, info gopacket.CaptureInfo) (res []*packet.P
 		SendFlags:    data[offset+50] & 0x7f,
 		EnqueueIndex: data[offset+51],
 		NumSpins:     0,
+		Size:         uint16(info.Length),
 	}
 	for i := 56; i < 64; i++ {
 		v := data[offset+i]

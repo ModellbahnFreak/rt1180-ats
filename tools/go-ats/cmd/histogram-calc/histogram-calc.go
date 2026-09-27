@@ -291,6 +291,9 @@ func updateBoxPlot(newValues []float64, oldValues []float64, oldBoxPlot *BoxPlot
 
 func writeHistogram(histBuckets *Histogram, addData ...float64) {
 	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_hist.csv"
+	if len(out) > 0 {
+		newFileName = out
+	}
 	f, err := os.Create(newFileName)
 	if err != nil {
 		log.Fatalf("Could not open output file %s: %v", newFileName, err)
@@ -318,6 +321,9 @@ func writeHistogram(histBuckets *Histogram, addData ...float64) {
 
 func writeBoxplotTex(boxplot *BoxPlot) {
 	newFileName := strings.TrimSuffix(in, path.Ext(in)) + "_boxpl.tex"
+	if len(out) > 0 {
+		newFileName = strings.TrimSuffix(strings.TrimSuffix(in, path.Ext(out)), "_hist") + "_boxpl.tex"
+	}
 	f, err := os.Create(newFileName)
 	if err != nil {
 		log.Fatalf("Could not open output file %s: %v", newFileName, err)
